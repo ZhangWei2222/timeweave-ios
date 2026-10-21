@@ -32,6 +32,17 @@ App 连接 `http://127.0.0.1:8787/v1/analysis`，发送统计范围、时区、�
 
 每次分析独立，不保留聊天上下文；出错后可手动重试。默认 35 秒客户端超时，Go 分析超时 30 秒。看到连接错误时，先确认 Mac 服务已启动。真机的 `127.0.0.1` 指向手机自身，当前 AI 分析仅支持模拟器连接本机服务。
 
+端到端 UI 测试通过单独的 `TimeWeaveLocalAnalysis` scheme 显式执行。使用全新模拟器（成功用例会创建一条 60 分钟的测试记录），先启动本机服务：
+
+```sh
+xcodebuild -project TimeWeave.xcodeproj -scheme TimeWeaveLocalAnalysis \
+  -destination 'platform=iOS Simulator,id=<全新模拟器的 UDID>' \
+  -only-testing:TimeWeaveLocalAnalysisTests/LocalAnalysisUITests/testSnapshotAnalysisReachesServerAndDisplaysAnswer \
+  CODE_SIGNING_ALLOWED=NO test
+```
+
+验证服务未启动的错误页时，先停止服务，将 `-only-testing` 的方法改为 `testUnavailableServerShowsRetry`。两种测试的外部服务前提相反，应分别运行。
+
 ## 自动验证
 
 核心模型由 App 和 Swift Package 共用，测试不需要模拟器：

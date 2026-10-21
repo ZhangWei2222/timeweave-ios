@@ -53,4 +53,19 @@ final class AnalysisSnapshotTests: XCTestCase {
             XCTAssertEqual(result.days.last?.minutes, expected)
         }
     }
+
+    func testMidnightDSTAndEmojiCategoriesMatchServerContract() throws {
+        for (zone, nowText, minutes) in [("America/Santiago", "2026-09-06T16:00:00Z", 1380), ("America/Havana", "2026-11-01T18:00:00Z", 1500)] {
+            let cal = calendar(zone)
+            let now = date(nowText)
+            let day = cal.dateInterval(of: .day, for: now)!
+            var ledger = TimeLedger()
+            ledger.categories[0].name = String(repeating: "🇨🇳", count: 13)
+            ledger.entries = [TimeEntry(start: day.start, end: day.end, note: "", categoryID: ledger.categories[0].id)]
+            let result = try AnalysisSnapshotBuilder.build(ledger: ledger, period: 7, now: now, calendar: cal)
+            XCTAssertEqual(result.totalMinutes, minutes)
+            XCTAssertEqual(result.days.last?.minutes, minutes)
+            XCTAssertEqual(result.categories.first?.name.count, 13)
+        }
+    }
 }
