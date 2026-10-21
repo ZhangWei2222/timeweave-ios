@@ -37,6 +37,10 @@ struct StatisticsView: View {
             ScrollView {
                 VStack(spacing: 20) {
                     Picker("统计范围", selection: $period) { Text("近 7 天").tag(7); Text("近 30 天").tag(30) }.pickerStyle(.segmented)
+                    NavigationLink { AIAnalysisView(period: period, store: store) } label: {
+                        Label("AI 分析近 \(period) 天", systemImage: "sparkles")
+                            .frame(maxWidth: .infinity)
+                    }.buttonStyle(.borderedProminent)
                     Card {
                         Text("把时间看得更清楚").font(.headline)
                         Text(durationText(total)).font(.largeTitle.weight(.semibold)).foregroundStyle(Palette.accent)

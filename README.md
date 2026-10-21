@@ -24,6 +24,14 @@
 
 真机运行：在 Xcode 的 Settings > Accounts 登录 Apple 账户，连接并信任 iPhone，启用开发者模式，在 Signing & Capabilities 选择自己的 Team，选择该手机后运行。工程不包含个人签名身份。
 
+## V2 AI 时间分析
+
+在 Mac 的 `selfweave-agent` 仓库设置 `SELFWEAVE_MODEL_BASE_URL`、`SELFWEAVE_MODEL_API_KEY`、`SELFWEAVE_MODEL_NAME`，运行 `go run ./cmd/selfweave-server`。在 iOS Simulator 打开「统计 → AI 分析近 7／30 天」，输入问题后提交。
+
+App 连接 `http://127.0.0.1:8787/v1/analysis`，发送统计范围、时区、总分钟、分类名称/分钟、每日日期/分钟和问题。不会发送原始记录、备注或 UUID；密钥只保存在 Mac 服务环境里。问题和聚合数据会发送给百炼，并写入 Mac 私有运行日志。
+
+每次分析独立，不保留聊天上下文；出错后可手动重试。默认 35 秒客户端超时，Go 分析超时 30 秒。看到连接错误时，先确认 Mac 服务已启动。真机的 `127.0.0.1` 指向手机自身，当前 AI 分析仅支持模拟器连接本机服务。
+
 ## 自动验证
 
 核心模型由 App 和 Swift Package 共用，测试不需要模拟器：

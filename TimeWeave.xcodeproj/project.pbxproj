@@ -7,6 +7,12 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		F20000000000000000000001 = {isa = PBXBuildFile; fileRef = F20000000000000000000002; };
+		V20000000000000000000001 = {isa = PBXBuildFile; fileRef = V20000000000000000000011; };
+		V20000000000000000000002 = {isa = PBXBuildFile; fileRef = V20000000000000000000012; };
+		V20000000000000000000003 = {isa = PBXBuildFile; fileRef = V20000000000000000000013; };
+		V20000000000000000000004 = {isa = PBXBuildFile; fileRef = V20000000000000000000014; };
+		V20000000000000000000005 = {isa = PBXBuildFile; fileRef = V20000000000000000000015; };
 		A1B2C3D4E5F6000000000001 /* TimeWeaveApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1B2C3D4E5F6000000000001 /* TimeWeaveApp.swift */; };
 		A1B2C3D4E5F6000000000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1B2C3D4E5F6000000000002 /* ContentView.swift */; };
 		A1B2C3D4E5F600000000000A = {isa = PBXBuildFile; fileRef = B1B2C3D4E5F600000000000A; };
@@ -21,6 +27,13 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		F20000000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UITests/LocalAnalysisUITests.swift; sourceTree = SOURCE_ROOT; };
+		F20000000000000000000003 = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = TimeWeaveLocalAnalysisTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		V20000000000000000000011 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Core/AnalysisSnapshot.swift"; sourceTree = "<group>"; };
+		V20000000000000000000012 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Core/AnalysisSnapshotBuilder.swift"; sourceTree = "<group>"; };
+		V20000000000000000000013 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Core/AgentClient.swift"; sourceTree = "<group>"; };
+		V20000000000000000000014 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Core/AIAnalysisViewModel.swift"; sourceTree = "<group>"; };
+		V20000000000000000000015 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AIAnalysisView.swift; sourceTree = "<group>"; };
 		B1B2C3D4E5F6000000000001 /* TimeWeaveApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimeWeaveApp.swift; sourceTree = "<group>"; };
 		B1B2C3D4E5F6000000000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		B1B2C3D4E5F6000000000003 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -37,6 +50,7 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
+		F20000000000000000000004 = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 		D1B2C3D4E5F6000000000001 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
@@ -50,6 +64,7 @@
 		C1B2C3D4E5F6000000000001 = {
 			isa = PBXGroup;
 			children = (
+				F20000000000000000000002,
 				C1B2C3D4E5F6000000000002 /* TimeWeave */,
 				C1B2C3D4E5F6000000000003 /* Products */,
 			);
@@ -58,6 +73,11 @@
 		C1B2C3D4E5F6000000000002 /* TimeWeave */ = {
 			isa = PBXGroup;
 			children = (
+				V20000000000000000000011,
+				V20000000000000000000012,
+				V20000000000000000000013,
+				V20000000000000000000014,
+				V20000000000000000000015,
 				B1B2C3D4E5F6000000000001 /* TimeWeaveApp.swift */,
 				B1B2C3D4E5F6000000000002 /* ContentView.swift */,
 				B1B2C3D4E5F6000000000012,
@@ -77,6 +97,7 @@
 		C1B2C3D4E5F6000000000003 /* Products */ = {
 			isa = PBXGroup;
 			children = (
+				F20000000000000000000003,
 				B1B2C3D4E5F6000000000004 /* TimeWeave.app */,
 			);
 			name = Products;
@@ -85,6 +106,17 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
+		F20000000000000000000005 = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F20000000000000000000006;
+			buildPhases = (F20000000000000000000007, F20000000000000000000004);
+			buildRules = ();
+			dependencies = (F20000000000000000000008);
+			name = TimeWeaveLocalAnalysisTests;
+			productName = TimeWeaveLocalAnalysisTests;
+			productReference = F20000000000000000000003;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 		E1B2C3D4E5F6000000000001 /* TimeWeave */ = {
 			isa = PBXNativeTarget;
 			buildConfigurationList = G1B2C3D4E5F6000000000002 /* Build configuration list for PBXNativeTarget "TimeWeave" */;
@@ -131,6 +163,7 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
+				F20000000000000000000005,
 				E1B2C3D4E5F6000000000001 /* TimeWeave */,
 			);
 		};
@@ -147,10 +180,16 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
+		F20000000000000000000007 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (F20000000000000000000001); runOnlyForDeploymentPostprocessing = 0; };
 		D1B2C3D4E5F6000000000002 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				V20000000000000000000001,
+				V20000000000000000000002,
+				V20000000000000000000003,
+				V20000000000000000000004,
+				V20000000000000000000005,
 				A1B2C3D4E5F6000000000001 /* TimeWeaveApp.swift in Sources */,
 				A1B2C3D4E5F6000000000002 /* ContentView.swift in Sources */,
 				A1B2C3D4E5F6000000000012,
@@ -168,6 +207,24 @@
 /* End PBXSourcesBuildPhase section */
 
 /* Begin XCBuildConfiguration section */
+		F20000000000000000000009 = {isa = XCBuildConfiguration; buildSettings = {
+			GENERATE_INFOPLIST_FILE = YES;
+			IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+			PRODUCT_BUNDLE_IDENTIFIER = com.zhangwei2222.timeweave.local-analysis-tests;
+			PRODUCT_NAME = "$(TARGET_NAME)";
+			SWIFT_VERSION = 6.0;
+			TARGETED_DEVICE_FAMILY = "1,2";
+			TEST_TARGET_NAME = TimeWeave;
+		}; name = Debug; };
+		F2000000000000000000000A = {isa = XCBuildConfiguration; buildSettings = {
+			GENERATE_INFOPLIST_FILE = YES;
+			IPHONEOS_DEPLOYMENT_TARGET = 16.0;
+			PRODUCT_BUNDLE_IDENTIFIER = com.zhangwei2222.timeweave.local-analysis-tests;
+			PRODUCT_NAME = "$(TARGET_NAME)";
+			SWIFT_VERSION = 6.0;
+			TARGETED_DEVICE_FAMILY = "1,2";
+			TEST_TARGET_NAME = TimeWeave;
+		}; name = Release; };
 		H1B2C3D4E5F6000000000001 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -222,6 +279,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = TimeWeave/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "时序";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -248,6 +306,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = TimeWeave/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "时序";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -270,6 +329,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		F20000000000000000000006 = {isa = XCConfigurationList; buildConfigurations = (F20000000000000000000009, F2000000000000000000000A); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 		G1B2C3D4E5F6000000000001 /* Build configuration list for PBXProject "TimeWeave" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
@@ -289,6 +349,8 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+		F20000000000000000000008 = {isa = PBXTargetDependency; target = E1B2C3D4E5F6000000000001; targetProxy = F2000000000000000000000B; };
+		F2000000000000000000000B = {isa = PBXContainerItemProxy; containerPortal = F1B2C3D4E5F6000000000001; proxyType = 1; remoteGlobalIDString = E1B2C3D4E5F6000000000001; remoteInfo = TimeWeave; };
 	};
 	rootObject = F1B2C3D4E5F6000000000001 /* Project object */;
 }
