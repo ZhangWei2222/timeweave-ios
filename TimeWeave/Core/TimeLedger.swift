@@ -34,6 +34,26 @@ struct TimeLedger: Codable, Equatable, Sendable {
         TimeCategory(name: "其他", color: .orange)
     ]
     var entries: [TimeEntry] = []
+    var activeTimerStart: Date?
+
+    mutating func startTimer(at start: Date, now: Date = Date()) throws {
+        guard activeTimerStart == nil else { throw LedgerError("已有一段时间正在计时。") }
+        guard start.timeIntervalSince1970.isFinite, start <= now else {
+            throw LedgerError("开始时间不能晚于现在。")
+        }
+        activeTimerStart = start
+    }
+
+    mutating func stopTimer(at end: Date = Date()) throws -> DateInterval {
+        guard let start = activeTimerStart else { throw LedgerError("当前没有正在进行的计时。") }
+        guard end.timeIntervalSince1970.isFinite, end > start else {
+            throw LedgerError("结束时间必须晚于开始时间。")
+        }
+        activeTimerStart = nil
+        return DateInterval(start: start, end: end)
+    }
+
+    mutating func cancelTimer() { activeTimerStart = nil }
 
     mutating func saveEntry(_ entry: TimeEntry, now: Date = Date()) throws {
         guard entry.start.timeIntervalSince1970.isFinite, entry.end.timeIntervalSince1970.isFinite,
@@ -81,6 +101,9 @@ struct TimeLedger: Codable, Equatable, Sendable {
         guard !categories.isEmpty,
               Set(categories.map(\.id)).count == categories.count,
               Set(entries.map(\.id)).count == entries.count else { throw LedgerError("本地数据结构异常，原文件已保留。") }
+        guard activeTimerStart?.timeIntervalSince1970.isFinite ?? true else {
+            throw LedgerError("本地计时状态异常，原文件已保留。")
+        }
         var checked = TimeLedger()
         checked.categories = []
         for category in categories { try checked.saveCategory(category) }

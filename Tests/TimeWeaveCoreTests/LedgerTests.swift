@@ -36,6 +36,57 @@ final class LedgerTests: XCTestCase {
         XCTAssertThrowsError(try ledger.saveEntry(entry("2026-10-16T09:00:00Z", "2026-10-16T10:00:00Z", category: UUID()), now: now))
         XCTAssertTrue(ledger.entries.isEmpty)
     }
+    func testLegacyLedgerWithoutTimerStateDecodesAsIdle() throws {
+        let categoryID = "00000000-0000-0000-0000-000000000001"
+        let json = """
+        {
+          "schemaVersion": 1,
+          "categories": [{"id": "\(categoryID)", "name": "工作", "color": "teal"}],
+          "entries": []
+        }
+        """
+        let ledger = try JSONDecoder().decode(TimeLedger.self, from: Data(json.utf8))
+        XCTAssertNil(ledger.activeTimerStart)
+    }
+    func testTimerStartsOnceAndRejectsFutureStartWithoutOverwritingIt() throws {
+        var ledger = TimeLedger()
+        let start = date("2026-10-16T10:00:00Z")
+        try ledger.startTimer(at: start, now: start)
+        XCTAssertEqual(ledger.activeTimerStart, start)
+
+        XCTAssertThrowsError(try ledger.startTimer(at: date("2026-10-16T10:01:00Z"), now: date("2026-10-16T10:01:00Z")))
+        XCTAssertEqual(ledger.activeTimerStart, start)
+
+        var idleLedger = TimeLedger()
+        XCTAssertThrowsError(try idleLedger.startTimer(at: date("2026-10-16T12:01:00Z"), now: now))
+        XCTAssertNil(idleLedger.activeTimerStart)
+    }
+    func testTimerInvalidStopPreservesStateAndValidStopReturnsInterval() throws {
+        var ledger = TimeLedger()
+        let start = date("2026-10-16T10:00:00Z")
+        try ledger.startTimer(at: start, now: start)
+
+        XCTAssertThrowsError(try ledger.stopTimer(at: start))
+        XCTAssertEqual(ledger.activeTimerStart, start)
+
+        let end = date("2026-10-16T10:05:00Z")
+        let interval = try ledger.stopTimer(at: end)
+        XCTAssertEqual(interval.start, start)
+        XCTAssertEqual(interval.end, end)
+        XCTAssertNil(ledger.activeTimerStart)
+        XCTAssertThrowsError(try ledger.stopTimer(at: end))
+    }
+    func testCancelTimerPreservesSavedEntries() throws {
+        var ledger = TimeLedger()
+        let saved = entry("2026-10-16T09:00:00Z", "2026-10-16T10:00:00Z", category: ledger.categories[0].id)
+        try ledger.saveEntry(saved, now: now)
+        try ledger.startTimer(at: date("2026-10-16T11:00:00Z"), now: now)
+
+        ledger.cancelTimer()
+
+        XCTAssertNil(ledger.activeTimerStart)
+        XCTAssertEqual(ledger.entries, [saved])
+    }
     func testCrossMidnightClipsAndMidnightEndDoesNotLeak() throws {
         var ledger = TimeLedger()
         try ledger.saveEntry(entry("2026-10-14T23:00:00Z", "2026-10-15T01:00:00Z", category: ledger.categories[0].id), now: now)
