@@ -45,4 +45,4 @@
 - [x] 写 UI 测试：设置保存远端、返回切本地、重启保留本地地址；先观察控件缺失失败，再实现 UI，运行测试通过。
 - [x] 双 SDK `xcodebuild ... CODE_SIGNING_ALLOWED=NO build` 成功；文档说明真机地址、令牌、未开公网边界。
 - [x] 提交功能及验证记录，独立只读 review；Critical/Important 做一次 RED→GREEN 修复。
-- [ ] 按仓库规则合回 main，再运行全套测试并确认用户签名差异保留，不 push。
+- [x] 按仓库规则合回 main，再运行全套测试并确认用户签名差异保留，不 push。

@@ -22,7 +22,9 @@
 - `testTimerStartStopOpensConfirmationAndSaves`：计时结束确认交互不回归。
 - `testManyCategoriesKeepEditorOnOneScreen`：多分类确认面板不回归。
 
-审查后最终界面复验：3/3、0 失败（2026-10-25 12:58:59）；真机 SDK 再编译成功。合并后核心结果见本文件最终更新。
+审查后最终界面复验：3/3、0 失败（2026-10-25 12:58:59）；双 SDK 再编译成功。
+
+`6153d17` 已本地快进合入 `main`，同一树再次运行 Swift XCTest：32/32（13:00:17）。没有 push。现有 `project.pbxproj` 未提交差异在集成前后 SHA-256 均为 `cbe10d4e76aeb778589a71216e9d524497811592d4cc9c5b90ba5b33f08eb826`，个人签名及原有格式变更没有被提交、丢弃或改写。本验收记录最后作为同一功能分支的文档提交，再快进同步至 main。
 
 ## 审查范围与边界判断
 
