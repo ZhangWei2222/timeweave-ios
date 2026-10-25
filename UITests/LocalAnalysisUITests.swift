@@ -3,6 +3,51 @@ import XCTest
 // Opt-in scheme; start the local server first. Use an isolated simulator.
 final class LocalAnalysisUITests: XCTestCase {
     @MainActor
+    func testServiceEnvironmentSwitchPersistsAndShowsCurrentAddress() throws {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launch()
+        app.tabBars.buttons["统计"].tap()
+        app.buttons["AI 分析近 7 天"].tap()
+        let settings = app.buttons["analysisServiceSettings"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5))
+        settings.tap()
+        app.buttons["远端"].tap()
+        let token = app.secureTextFields["remoteAccessToken"]
+        XCTAssertTrue(token.waitForExistence(timeout: 5))
+        token.tap()
+        token.typeText(String(repeating: "x", count: 64))
+        app.buttons["saveAnalysisService"].tap()
+        XCTAssertTrue(app.buttons["saveAnalysisService"].waitForNonExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["当前服务：远端"].waitForExistence(timeout: 5), app.debugDescription)
+        XCTAssertTrue(app.staticTexts["https://api.super-vivian.top"].exists)
+        app.terminate()
+        app.launch()
+        app.tabBars.buttons["统计"].tap()
+        app.buttons["AI 分析近 7 天"].tap()
+        XCTAssertTrue(app.staticTexts["当前服务：远端"].waitForExistence(timeout: 5))
+        app.buttons["analysisServiceSettings"].tap()
+        // Empty field must reuse the real simulator Keychain item, not UserDefaults.
+        app.buttons["saveAnalysisService"].tap()
+        XCTAssertTrue(app.buttons["saveAnalysisService"].waitForNonExistence(timeout: 5))
+        app.buttons["analysisServiceSettings"].tap()
+        app.buttons["本地"].tap()
+        app.buttons["saveAnalysisService"].tap()
+        XCTAssertTrue(app.staticTexts["当前服务：本地"].waitForExistence(timeout: 5))
+        app.terminate()
+        app.launch()
+        app.tabBars.buttons["统计"].tap()
+        app.buttons["AI 分析近 7 天"].tap()
+        XCTAssertTrue(app.staticTexts["当前服务：本地"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["http://127.0.0.1:8787"].exists)
+        app.buttons["analysisServiceSettings"].tap()
+        app.buttons["远端"].tap()
+        app.buttons["删除已保存的远端令牌"].tap()
+        app.buttons["删除令牌"].tap()
+        app.buttons["取消"].tap()
+    }
+
+    @MainActor
     func testTimerStartStopOpensConfirmationAndSaves() throws {
         continueAfterFailure = false
         let app = XCUIApplication()

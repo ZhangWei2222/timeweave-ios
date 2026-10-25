@@ -1,5 +1,6 @@
 import XCTest
 import Foundation
+import Network
 @testable import TimeWeaveCore
 
 final class AgentClientTests: XCTestCase, @unchecked Sendable {
@@ -62,6 +63,90 @@ final class AgentClientTests: XCTestCase, @unchecked Sendable {
             XCTAssertEqual(error.localizedDescription, "快照无效")
         }
     }
+
+    @MainActor
+    func testSelectedRemoteAddsBearerWhileLocalNeverUsesRemoteToken() async throws {
+        let name = "TimeWeave.RequestTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        let settings = AnalysisServiceSettings(defaults: defaults, tokens: MemoryAnalysisTokens())
+        let token = String(repeating: "b", count: 64)
+        try settings.save(environment: .remote, localAddress: settings.localAddress, remoteAddress: "https://api.example.com", token: token)
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [StubURLProtocol.self]
+        let session = URLSession(configuration: config)
+        StubURLProtocol.set { request in
+            XCTAssertEqual(request.url?.absoluteString, "https://api.example.com/v1/analysis")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer " + token)
+            return (200, Data(#"{"schema_version":1,"run_id":"remote","answer":"远端"}"#.utf8))
+        }
+        let remote = try settings.makeClient(session: session)
+        let answer = try await remote.analyze(question: "分析", snapshot: snapshot())
+        XCTAssertEqual(answer.runID, "remote")
+        try settings.save(environment: .local, localAddress: settings.localAddress, remoteAddress: settings.remoteAddress, token: nil)
+        StubURLProtocol.set { request in
+            XCTAssertEqual(request.url?.host, "127.0.0.1")
+            XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+            return (200, Data(#"{"schema_version":1,"run_id":"local","answer":"本地"}"#.utf8))
+        }
+        _ = try await settings.makeClient(session: session).analyze(question: "分析", snapshot: snapshot())
+    }
+
+    func testClientRefusesRedirectRatherThanResendingSensitivePOST() async throws {
+        let server = try AnalysisRedirectServer()
+        defer { server.stop() }
+        let port = try await server.start()
+        let client = AgentClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!, accessToken: String(repeating: "x", count: 64))
+        do {
+            _ = try await client.analyze(question: "不应被转发", snapshot: snapshot())
+            XCTFail("followed the redirect and leaked the analysis to /leak")
+        } catch let error as AgentClientError { XCTAssertEqual(error, .invalidResponse) }
+    }
+}
+
+/// Real loopback HTTP boundary: following the 307 returns a valid but wrong answer.
+private final class AnalysisRedirectServer: @unchecked Sendable {
+    private let listener: NWListener
+    private let queue = DispatchQueue(label: "TimeWeave.RedirectTest")
+    init() throws {
+        let parameters = NWParameters.tcp
+        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+        listener = try NWListener(using: parameters)
+        listener.newConnectionHandler = { [weak self] connection in
+            guard let self else { connection.cancel(); return }
+            connection.start(queue: self.queue)
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, _, _ in
+                guard let self, let data, let port = self.listener.port else { connection.cancel(); return }
+                let firstLine = String(decoding: data, as: UTF8.self).components(separatedBy: "\r\n")[0]
+                let response: String
+                if firstLine.contains(" /v1/analysis ") {
+                    response = "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://127.0.0.1:\(port.rawValue)/leak\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                } else {
+                    let answer = #"{"schema_version":1,"run_id":"leak","answer":"redirect followed"}"#
+                    response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(answer.utf8.count)\r\nConnection: close\r\n\r\n" + answer
+                }
+                connection.send(content: Data(response.utf8), completion: .contentProcessed { _ in connection.cancel() })
+            }
+        }
+    }
+    func start() async throws -> UInt16 {
+        try await withCheckedThrowingContinuation { continuation in
+            listener.stateUpdateHandler = { [weak self] state in
+                guard let self else { return }
+                switch state {
+                case .ready:
+                    self.listener.stateUpdateHandler = nil
+                    continuation.resume(returning: self.listener.port!.rawValue)
+                case .failed(let error):
+                    self.listener.stateUpdateHandler = nil
+                    continuation.resume(throwing: error)
+                default: break
+                }
+            }
+            listener.start(queue: queue)
+        }
+    }
+    func stop() { listener.cancel() }
 }
 
 private final class StubURLProtocol: URLProtocol, @unchecked Sendable {

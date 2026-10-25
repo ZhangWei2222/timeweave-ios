@@ -7,13 +7,17 @@ final class AIAnalysisViewModel: ObservableObject {
     @Published private(set) var isLoading = false
     @Published private(set) var response: AnalysisResponse?
     @Published private(set) var error: AgentClientError?
-    private let client: any AgentAnalyzing
+    private let clientProvider: @MainActor () throws -> any AgentAnalyzing
     private let snapshotBuilder: @MainActor () throws -> AnalysisSnapshot
     private var task: Task<Void, Never>?
     private var generation = UUID()
 
     init(client: any AgentAnalyzing = AgentClient(), snapshotBuilder: @escaping @MainActor () throws -> AnalysisSnapshot) {
-        self.client = client
+        self.clientProvider = { client }
+        self.snapshotBuilder = snapshotBuilder
+    }
+    init(clientProvider: @escaping @MainActor () throws -> any AgentAnalyzing, snapshotBuilder: @escaping @MainActor () throws -> AnalysisSnapshot) {
+        self.clientProvider = clientProvider
         self.snapshotBuilder = snapshotBuilder
     }
     var canSubmit: Bool {
@@ -22,6 +26,13 @@ final class AIAnalysisViewModel: ObservableObject {
     }
     func submit() {
         guard canSubmit else { return }
+        let client: any AgentAnalyzing
+        do { client = try clientProvider() }
+        catch {
+            response = nil
+            self.error = (error as? AgentClientError) ?? .configuration("服务配置不可用，请检查服务设置。")
+            return
+        }
         let snapshot: AnalysisSnapshot
         do { snapshot = try snapshotBuilder() }
         catch { self.error = .server(code: "snapshot_invalid", message: "无法生成统计快照，请检查本地记录。", retryable: false, runID: nil); return }
@@ -50,5 +61,10 @@ final class AIAnalysisViewModel: ObservableObject {
         task?.cancel()
         task = nil
         isLoading = false
+    }
+    func serviceConfigurationChanged() {
+        cancel()
+        response = nil
+        error = nil
     }
 }

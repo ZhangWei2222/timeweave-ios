@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		A30000000000000000000001 /* AnalysisServiceSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = A30000000000000000000002; };
 		F20000000000000000000001 = {isa = PBXBuildFile; fileRef = F20000000000000000000002; };
 		V20000000000000000000001 = {isa = PBXBuildFile; fileRef = V20000000000000000000011; };
 		V20000000000000000000002 = {isa = PBXBuildFile; fileRef = V20000000000000000000012; };
@@ -27,6 +28,7 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		A30000000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core/AnalysisServiceSettings.swift; sourceTree = "<group>"; };
 		F20000000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UITests/LocalAnalysisUITests.swift; sourceTree = SOURCE_ROOT; };
 		F20000000000000000000003 = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = TimeWeaveLocalAnalysisTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		V20000000000000000000011 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Core/AnalysisSnapshot.swift"; sourceTree = "<group>"; };
@@ -73,6 +75,7 @@
 		C1B2C3D4E5F6000000000002 /* TimeWeave */ = {
 			isa = PBXGroup;
 			children = (
+				A30000000000000000000002,
 				V20000000000000000000011,
 				V20000000000000000000012,
 				V20000000000000000000013,
@@ -185,6 +188,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A30000000000000000000001,
 				V20000000000000000000001,
 				V20000000000000000000002,
 				V20000000000000000000003,

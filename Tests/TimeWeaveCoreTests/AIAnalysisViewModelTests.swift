@@ -41,6 +41,36 @@ final class AIAnalysisViewModelTests: XCTestCase {
         XCTAssertEqual(vm.response?.runID, "new")
     }
     private func settle() async { for _ in 0..<20 { await Task.yield() } }
+
+    func testEnvironmentChangeClearsStateAndSnapshotsNewClient() async throws {
+        let local = ControlledAnalysisClient()
+        let remote = ControlledAnalysisClient()
+        var selected: any AgentAnalyzing = local
+        let vm = AIAnalysisViewModel(clientProvider: { selected }) { try AnalysisSnapshotBuilder.build(ledger: TimeLedger(), period: 7) }
+        vm.submit()
+        await local.waitForCalls(1)
+        selected = remote
+        vm.serviceConfigurationChanged()
+        XCTAssertFalse(vm.isLoading)
+        XCTAssertNil(vm.response)
+        XCTAssertNil(vm.error)
+        vm.submit()
+        await remote.waitForCalls(1)
+        remote.finish(.success(.init(schemaVersion: 1, runID: "remote", answer: "新环境")))
+        await settle()
+        local.finish(.success(.init(schemaVersion: 1, runID: "local", answer: "旧环境")))
+        await settle()
+        XCTAssertEqual(vm.response?.runID, "remote")
+        vm.serviceConfigurationChanged()
+        XCTAssertNil(vm.response)
+    }
+
+    func testConfigurationFailureIsNotSubmittedAndIsNotRetryable() async {
+        let vm = AIAnalysisViewModel(clientProvider: { throw AgentClientError.configuration("请配置令牌") }) { try AnalysisSnapshotBuilder.build(ledger: TimeLedger(), period: 7) }
+        vm.submit()
+        XCTAssertFalse(vm.isLoading)
+        XCTAssertEqual(vm.error?.retryable, false)
+    }
 }
 
 @MainActor
