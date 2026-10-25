@@ -65,6 +65,41 @@ final class AnalysisServiceSettingsTests: XCTestCase {
         }
     }
 
+    func testDraftDiscardsTokenWhenRemoteHostOrPortChanges() throws {
+        let (defaults, name) = preferences()
+        defer { defaults.removePersistentDomain(forName: name) }
+        let settings = AnalysisServiceSettings(defaults: defaults, tokens: MemoryAnalysisTokens())
+        for address in ["https://different.example.com", "https://api.super-vivian.top:8443"] {
+            var draft = AnalysisServiceDraft(service: settings)
+            draft.environment = .remote
+            draft.token = token
+            draft.remoteAddress = address
+            XCTAssertTrue(draft.token.isEmpty, "a token entered for A must not be reused for B")
+            XCTAssertThrowsError(try draft.save(to: settings))
+            XCTAssertEqual(settings.environment, .local)
+        }
+    }
+
+    func testSavingLocalIgnoresInvalidRemoteDraftAndDoesNotWriteRemoteSecrets() throws {
+        let (defaults, name) = preferences()
+        defer { defaults.removePersistentDomain(forName: name) }
+        let vault = MemoryAnalysisTokens()
+        let settings = AnalysisServiceSettings(defaults: defaults, tokens: vault)
+        var draft = AnalysisServiceDraft(service: settings)
+        draft.remoteAddress = "https://unfinished/invalid-path"
+        draft.token = "short"
+        draft.localAddress = "http://192.168.1.5:8787"
+        draft.environment = .local
+        try draft.save(to: settings)
+        XCTAssertEqual(try settings.makeClient().baseURL.absoluteString, "http://192.168.1.5:8787")
+        XCTAssertEqual(settings.remoteAddress, "https://api.super-vivian.top")
+        XCTAssertTrue(vault.values.isEmpty)
+        draft.remoteAddress = "https://other.example.com"
+        draft.token = token
+        vault.fail = true
+        XCTAssertNoThrow(try draft.save(to: settings), "local mode must not depend on remote Keychain availability")
+    }
+
     private func preferences() -> (UserDefaults, String) {
         let name = "TimeWeave.AnalysisTests.\(UUID().uuidString)"
         return (UserDefaults(suiteName: name)!, name)

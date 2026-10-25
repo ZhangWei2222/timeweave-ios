@@ -8,6 +8,29 @@ enum AnalysisEnvironment: String, Codable, CaseIterable, Identifiable {
     var title: String { self == .local ? "本地" : "远端" }
 }
 
+/// Editable form state, kept separate from the last successfully saved settings.
+@MainActor
+struct AnalysisServiceDraft {
+    var environment: AnalysisEnvironment
+    var localAddress: String
+    var remoteAddress: String {
+        didSet { if remoteAddress != oldValue { token = "" } }
+    }
+    var token = ""
+
+    init(service: AnalysisServiceSettings) {
+        environment = service.environment
+        localAddress = service.localAddress
+        remoteAddress = service.remoteAddress
+    }
+    func save(to service: AnalysisServiceSettings) throws {
+        try service.save(environment: environment,
+                         localAddress: environment == .local ? localAddress : service.localAddress,
+                         remoteAddress: environment == .remote ? remoteAddress : service.remoteAddress,
+                         token: environment == .remote && !token.isEmpty ? token : nil)
+    }
+}
+
 struct AnalysisEndpoint {
     let url: URL
     var origin: String { url.absoluteString }

@@ -35,7 +35,7 @@
 - Modify: `Tests/TimeWeaveCoreTests/AgentClientTests.swift`, `Tests/TimeWeaveCoreTests/AIAnalysisViewModelTests.swift`, `UITests/LocalAnalysisUITests.swift`, `README.md`
 
 **Interfaces:**
-- Produces: `AnalysisServiceSettings` (MainActor ObservableObject), `save(environment:localAddress:remoteAddress:token:) throws`, `makeClient(session:) throws -> AgentClient`、`revision`；`AnalysisEnvironment.local/.remote`；`AnalysisEndpoint` 规范化 origin。
+- Produces: `AnalysisServiceSettings` (MainActor ObservableObject), `save(environment:localAddress:remoteAddress:token:) throws`, `makeClient(session:) throws -> AgentClient`、`revision`；`AnalysisEnvironment.local/.remote`；`AnalysisEndpoint` 规范化 origin；`AnalysisServiceDraft.save(to:)` 仅提交选中环境，地址编辑即清空令牌草稿。
 - Consumes: 现有 `AgentAnalyzing.analyze(question:snapshot:)`、`AIAnalysisViewModel` generation 保护、已有快照结构。
 
 - [x] 写配置、偏好重载、origin 令牌隔离、写失败、URL/令牌边界测试；为现有请求测试增加远端 Bearer 和拒绝重定向；为 VM 增加切换 client 后清空/晚返回测试。
@@ -44,5 +44,5 @@
 - [x] 运行 `swift test`，预期全套无失败。
 - [x] 写 UI 测试：设置保存远端、返回切本地、重启保留本地地址；先观察控件缺失失败，再实现 UI，运行测试通过。
 - [x] 双 SDK `xcodebuild ... CODE_SIGNING_ALLOWED=NO build` 成功；文档说明真机地址、令牌、未开公网边界。
-- [ ] 提交功能及验证记录，独立只读 review；Critical/Important 做一次 RED→GREEN 修复。
+- [x] 提交功能及验证记录，独立只读 review；Critical/Important 做一次 RED→GREEN 修复。
 - [ ] 按仓库规则合回 main，再运行全套测试并确认用户签名差异保留，不 push。

@@ -81,10 +81,7 @@ private struct AnalysisServiceSettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var service: AnalysisServiceSettings
     let didChange: () -> Void
-    @State private var environment: AnalysisEnvironment
-    @State private var localAddress: String
-    @State private var remoteAddress: String
-    @State private var token = ""
+    @State private var draft: AnalysisServiceDraft
     @State private var error: String?
     @State private var notice: String?
     @State private var confirmingDelete = false
@@ -92,36 +89,34 @@ private struct AnalysisServiceSettingsView: View {
     init(service: AnalysisServiceSettings, didChange: @escaping () -> Void) {
         self.service = service
         self.didChange = didChange
-        _environment = State(initialValue: service.environment)
-        _localAddress = State(initialValue: service.localAddress)
-        _remoteAddress = State(initialValue: service.remoteAddress)
+        _draft = State(initialValue: AnalysisServiceDraft(service: service))
     }
 
     var body: some View {
         NavigationStack {
             Form {
                 Section {
-                    Picker("请求环境", selection: $environment) {
+                    Picker("请求环境", selection: $draft.environment) {
                         ForEach(AnalysisEnvironment.allCases) { Text($0.title).tag($0) }
                     }.pickerStyle(.segmented)
                 } footer: {
                     Text("保存后立即切换并取消当前请求，不会自动切到另一环境。已发出的请求无法从服务端撤回。")
                 }
-                if environment == .local {
+                if draft.environment == .local {
                     Section {
-                        addressField("本地服务地址", text: $localAddress)
+                        addressField("本地服务地址", text: $draft.localAddress)
                             .accessibilityIdentifier("localServiceAddress")
                     } header: { Text("本地服务") } footer: {
                         Text("模拟器使用 127.0.0.1；真机请填 Mac 的局域网地址，并允许本地网络权限。手机的 127.0.0.1 指手机自己。Mac 服务还需监听对应内网接口并允许防火墙访问。")
                     }
                 } else {
                     Section {
-                        addressField("HTTPS 远端地址", text: $remoteAddress)
+                        addressField("HTTPS 远端地址", text: $draft.remoteAddress)
                             .accessibilityIdentifier("remoteServiceAddress")
-                        SecureField("访问令牌（留空保留原令牌）", text: $token)
+                        SecureField("访问令牌（留空保留原令牌）", text: $draft.token)
                             .textInputAutocapitalization(.never).autocorrectionDisabled()
                             .privacySensitive().accessibilityIdentifier("remoteAccessToken")
-                        if remoteAddress == service.remoteAddress {
+                        if draft.remoteAddress == service.remoteAddress {
                             Button("删除已保存的远端令牌", role: .destructive) { confirmingDelete = true }
                         }
                     } header: { Text("远端服务") } footer: {
@@ -144,7 +139,7 @@ private struct AnalysisServiceSettingsView: View {
                     do {
                         try service.removeRemoteToken()
                         didChange()
-                        token = ""
+                        draft.token = ""
                         error = nil
                         notice = "令牌已立即删除。再次使用该远端地址时需要重新填写。"
                     } catch { self.error = error.localizedDescription }
@@ -160,10 +155,9 @@ private struct AnalysisServiceSettingsView: View {
 
     private func save() {
         do {
-            try service.save(environment: environment, localAddress: localAddress, remoteAddress: remoteAddress,
-                             token: token.isEmpty ? nil : token)
+            try draft.save(to: service)
             didChange()
-            token = ""
+            draft.token = ""
             dismiss()
         } catch { self.error = error.localizedDescription }
     }
