@@ -86,6 +86,7 @@ final class AIChatViewModel: ObservableObject {
     @Published private(set) var currentConversation: Conversation?
     @Published private(set) var messages: [ChatMessage] = []
     @Published private(set) var memories: [UserMemory] = []
+    @Published private(set) var memoryPreferences = MemoryPreferences(proactiveEnabled: true)
     @Published private(set) var isLoading = false
     @Published private(set) var error: AgentClientError?
 
@@ -129,10 +130,17 @@ final class AIChatViewModel: ObservableObject {
         }
         do {
             let capabilities = try await client.capabilities()
-            guard capabilities.schemaVersion == 1, capabilities.conversations else {
+            guard capabilities.schemaVersion == 1 else {
                 throw AgentClientError.invalidResponse
             }
+            guard capabilities.conversations else {
+                guard generation == expectedGeneration else { return }
+                mode = .legacy
+                conversations = []; currentConversation = nil; memories = []; error = nil
+                return
+            }
             let summaries = try await client.listConversations()
+            guard generation == expectedGeneration else { return }
             let selectedID = selectedConversationID(from: summaries)
             let selected: Conversation
             if let selectedID {
@@ -143,13 +151,17 @@ final class AIChatViewModel: ObservableObject {
             let refreshedSummaries = summaries.isEmpty ? [ConversationSummary(id: selected.id, title: selected.title, updatedAt: selected.updatedAt)] : summaries
             let loadedMemories = capabilities.memories ? try await client.listMemories() : []
             guard generation == expectedGeneration else { return }
+            let loadedPreferences = capabilities.memories ? try await client.memoryPreferences() : MemoryPreferences(proactiveEnabled: false)
+            guard generation == expectedGeneration else { return }
             mode = .chat
             conversations = refreshedSummaries
             currentConversation = selected
             messages = selected.messages
             memories = loadedMemories
+            memoryPreferences = loadedPreferences
             error = nil
             persistSelection(selected.id)
+            restorePendingTurnIfNeeded(client: client, conversation: selected, expectedGeneration: expectedGeneration)
         } catch let clientError as AgentClientError {
             guard generation == expectedGeneration else { return }
             if case .server(let code, _, _, _) = clientError, code == "not_found" || code == "method_not_allowed" {
@@ -157,6 +169,7 @@ final class AIChatViewModel: ObservableObject {
                 conversations = []
                 currentConversation = nil
                 memories = []
+                memoryPreferences = MemoryPreferences(proactiveEnabled: false)
                 error = nil
             } else {
                 mode = .loading
@@ -203,12 +216,15 @@ final class AIChatViewModel: ObservableObject {
                     let turn = try await client.sendMessage(conversationID: conversationID, messageID: messageID, question: question, periodDays: snapshot.days.count, snapshot: snapshot)
                     try self.validateTerminal(turn)
                     let refreshed = try await client.getConversation(id: conversationID)
+                    guard self.generation == expectedGeneration, !Task.isCancelled else { return }
                     let refreshedMemories = try await client.listMemories()
+                    guard self.generation == expectedGeneration, !Task.isCancelled else { return }
+                    let refreshedSummaries = try await client.listConversations()
                     guard self.generation == expectedGeneration, !Task.isCancelled else { return }
                     self.currentConversation = refreshed
                     self.messages = refreshed.messages
                     self.memories = refreshedMemories
-                    self.conversations = try await client.listConversations()
+                    self.conversations = refreshedSummaries
                     self.persistSelection(refreshed.id)
                 case .legacy:
                     let response = try await client.analyze(question: question, snapshot: snapshot)
@@ -251,6 +267,7 @@ final class AIChatViewModel: ObservableObject {
         currentConversation = nil
         messages = []
         memories = []
+        memoryPreferences = MemoryPreferences(proactiveEnabled: true)
         error = nil
         let expectedGeneration = generation
         task = Task { [weak self] in
@@ -261,44 +278,60 @@ final class AIChatViewModel: ObservableObject {
 
     func newConversation() async {
         guard mode == .chat else { return }
+        invalidateCurrentOperation()
+        let expectedGeneration = generation
         do {
             let client = try clientProvider()
             let created = try await client.createConversation()
-            conversations = try await client.listConversations()
+            guard generation == expectedGeneration else { return }
+            let updated = try await client.listConversations()
+            guard generation == expectedGeneration else { return }
+            conversations = updated
             currentConversation = created
             messages = created.messages
             pendingSubmission = nil
             error = nil
             persistSelection(created.id)
-        } catch { self.error = normalized(error) }
+        } catch { guard generation == expectedGeneration else { return }; self.error = normalized(error) }
     }
 
     func selectConversation(id: String) async {
         guard mode == .chat else { return }
+        invalidateCurrentOperation()
+        let expectedGeneration = generation
         do {
-            let selected = try await clientProvider().getConversation(id: id)
+            let client = try clientProvider()
+            let selected = try await client.getConversation(id: id)
+            guard generation == expectedGeneration else { return }
             currentConversation = selected
             messages = selected.messages
             pendingSubmission = nil
             error = nil
             persistSelection(id)
-        } catch { self.error = normalized(error) }
+            restorePendingTurnIfNeeded(client: client, conversation: selected, expectedGeneration: expectedGeneration)
+        } catch { guard generation == expectedGeneration else { return }; self.error = normalized(error) }
     }
 
     func deleteCurrentConversation(deleteMemories: Bool = false) async {
         guard mode == .chat, let id = currentConversation?.id else { return }
+        invalidateCurrentOperation()
+        let expectedGeneration = generation
         do {
             let client = try clientProvider()
             try await client.deleteConversation(id: id, deleteMemories: deleteMemories)
+            guard generation == expectedGeneration else { return }
             let remaining = try await client.listConversations()
+            guard generation == expectedGeneration else { return }
             conversations = remaining
             if let next = remaining.first {
                 let selected = try await client.getConversation(id: next.id)
+                guard generation == expectedGeneration else { return }
                 currentConversation = selected
                 messages = selected.messages
                 persistSelection(selected.id)
             } else {
                 let created = try await client.createConversation()
+                guard generation == expectedGeneration else { return }
                 currentConversation = created
                 messages = created.messages
                 conversations = [ConversationSummary(id: created.id, title: created.title, updatedAt: created.updatedAt)]
@@ -306,28 +339,101 @@ final class AIChatViewModel: ObservableObject {
             }
             pendingSubmission = nil
             error = nil
-        } catch { self.error = normalized(error) }
+        } catch { guard generation == expectedGeneration else { return }; self.error = normalized(error) }
     }
 
     func confirmMemory(id: String) async {
+        let expectedGeneration = generation
         do {
             let updated = try await clientProvider().confirmMemory(id: id)
+            guard generation == expectedGeneration else { return }
             replaceMemory(updated)
-        } catch { self.error = normalized(error) }
+        } catch { guard generation == expectedGeneration else { return }; self.error = normalized(error) }
     }
 
     func rejectMemory(id: String) async {
+        let expectedGeneration = generation
         do {
             _ = try await clientProvider().rejectMemory(id: id)
+            guard generation == expectedGeneration else { return }
             memories.removeAll { $0.id == id }
-        } catch { self.error = normalized(error) }
+        } catch { guard generation == expectedGeneration else { return }; self.error = normalized(error) }
     }
 
     func deleteMemory(id: String) async {
+        let expectedGeneration = generation
         do {
             try await clientProvider().deleteMemory(id: id)
+            guard generation == expectedGeneration else { return }
             memories.removeAll { $0.id == id }
-        } catch { self.error = normalized(error) }
+        } catch { guard generation == expectedGeneration else { return }; self.error = normalized(error) }
+    }
+
+    func editMemory(id: String, kind: UserMemoryKind, text: String) async {
+        let expectedGeneration = generation
+        do {
+            let updated = try await clientProvider().editMemory(id: id, kind: kind, text: text)
+            guard generation == expectedGeneration else { return }
+            replaceMemory(updated)
+        } catch { guard generation == expectedGeneration else { return }; self.error = normalized(error) }
+    }
+
+    func clearMemories() async {
+        let expectedGeneration = generation
+        do {
+            try await clientProvider().clearMemories()
+            guard generation == expectedGeneration else { return }
+            memories = []
+        } catch { guard generation == expectedGeneration else { return }; self.error = normalized(error) }
+    }
+
+    func setProactiveMemory(_ enabled: Bool) async {
+        let expectedGeneration = generation
+        do {
+            let updated = try await clientProvider().setProactiveMemory(enabled)
+            guard generation == expectedGeneration else { return }
+            memoryPreferences = updated
+        } catch { guard generation == expectedGeneration else { return }; self.error = normalized(error) }
+    }
+
+    private func restorePendingTurnIfNeeded(client: any AIChatService, conversation: Conversation, expectedGeneration: UUID) {
+        if let activeID = conversation.activeTurnID,
+           let turn = conversation.turns.first(where: { $0.id == activeID && ($0.status == .accepted || $0.status == .running) }) {
+            pendingSubmission = PendingSubmission(question: turn.question, messageID: turn.messageID)
+            draft = turn.question
+            isLoading = true
+            task = Task { [weak self, client] in
+                guard let self else { return }
+                do {
+                    let terminal = try await client.resumeTurn(conversationID: conversation.id, turnID: turn.id)
+                    try self.validateTerminal(terminal)
+                    let refreshed = try await client.getConversation(id: conversation.id)
+                    guard self.generation == expectedGeneration, !Task.isCancelled else { return }
+                    let refreshedMemories = try await client.listMemories()
+                    guard self.generation == expectedGeneration, !Task.isCancelled else { return }
+                    let refreshedSummaries = try await client.listConversations()
+                    guard self.generation == expectedGeneration, !Task.isCancelled else { return }
+                    self.currentConversation = refreshed; self.messages = refreshed.messages
+                    self.memories = refreshedMemories; self.conversations = refreshedSummaries
+                    self.pendingSubmission = nil; self.draft = ""; self.error = nil
+                } catch is CancellationError { return }
+                catch {
+                    guard self.generation == expectedGeneration, !Task.isCancelled else { return }
+                    self.error = self.normalized(error)
+                }
+                guard self.generation == expectedGeneration else { return }
+                self.isLoading = false; self.task = nil
+            }
+        } else if let paused = conversation.turns.last(where: { $0.status == .paused && ($0.retryable ?? false) }) {
+            pendingSubmission = PendingSubmission(question: paused.question, messageID: paused.messageID)
+            draft = paused.question
+            error = .server(code: paused.errorCode ?? "paused", message: paused.errorMessage ?? "分析暂时中断，可以重试。", retryable: true, runID: paused.runID)
+        }
+    }
+
+    private func invalidateCurrentOperation() {
+        generation = UUID()
+        task?.cancel(); task = nil; isLoading = false; pendingSubmission = nil
     }
 
     private func validateTerminal(_ turn: ConversationTurn) throws {

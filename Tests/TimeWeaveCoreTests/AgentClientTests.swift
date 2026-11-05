@@ -175,6 +175,35 @@ final class AgentClientTests: XCTestCase, @unchecked Sendable {
         }
     }
 
+    func testMemoryControlResourcesUseTypedContracts() async throws {
+        let client = AgentClient(session: stubSession())
+        StubURLProtocol.set { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/v1/memory-settings"):
+                return (200, Data(#"{"proactive_enabled":true}"#.utf8))
+            case ("PUT", "/v1/memory-settings"):
+                let object = try JSONSerialization.jsonObject(with: requestBodyData(request)) as! [String: Any]
+                XCTAssertEqual(object["proactive_enabled"] as? Bool, false)
+                return (200, Data(#"{"proactive_enabled":false}"#.utf8))
+            case ("PATCH", "/v1/memories/memory-1"):
+                return (200, Data(#"{"memory_id":"memory-1","kind":"goal","text":"每周复盘","status":"active","sensitivity":"normal","origin":"user_edited","source_conversation_id":"conv-1","source_message_id":"message-1","created_at":"2026-11-05T01:00:00Z","updated_at":"2026-11-05T01:00:01Z"}"#.utf8))
+            case ("DELETE", "/v1/memories"):
+                return (204, Data())
+            default:
+                XCTFail("unexpected request \(request.httpMethod ?? "") \(request.url?.path ?? "")")
+                return (500, Data())
+            }
+        }
+
+        let initial = try await client.memoryPreferences()
+        let disabled = try await client.setProactiveMemory(false)
+        let edited = try await client.editMemory(id: "memory-1", kind: .goal, text: "每周复盘")
+        XCTAssertTrue(initial.proactiveEnabled)
+        XCTAssertFalse(disabled.proactiveEnabled)
+        XCTAssertEqual(edited.text, "每周复盘")
+        try await client.clearMemories()
+    }
+
     private func stubSession() -> URLSession {
         let config = URLSessionConfiguration.ephemeral
         config.protocolClasses = [StubURLProtocol.self]

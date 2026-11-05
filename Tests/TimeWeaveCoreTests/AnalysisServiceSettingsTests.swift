@@ -19,7 +19,7 @@ final class AnalysisServiceSettingsTests: XCTestCase {
             let plaintext = (value as? Data).flatMap { String(data: $0, encoding: .utf8) } ?? String(describing: value)
             XCTAssertFalse(plaintext.contains(token))
         }
-        try reloaded.save(environment: .local, localAddress: reloaded.localAddress, remoteAddress: reloaded.remoteAddress, token: nil)
+        try reloaded.save(environment: .local, localAddress: reloaded.localAddress, remoteAddress: reloaded.remoteAddress, token: token)
         XCTAssertEqual(try reloaded.makeClient().baseURL.absoluteString, "http://192.168.1.10:8787")
     }
 
@@ -37,6 +37,18 @@ final class AnalysisServiceSettingsTests: XCTestCase {
         try settings.removeRemoteToken()
         XCTAssertThrowsError(try settings.makeClient())
         XCTAssertNotEqual(settings.revision, revision)
+    }
+
+    func testAuthenticatedLANServiceUsesOriginBoundToken() throws {
+        let (defaults, name) = preferences()
+        defer { defaults.removePersistentDomain(forName: name) }
+        let settings = AnalysisServiceSettings(defaults: defaults, tokens: MemoryAnalysisTokens())
+        try settings.save(environment: .local, localAddress: "http://192.168.1.20:8787", remoteAddress: settings.remoteAddress, token: token)
+        let client = try settings.makeClient()
+        XCTAssertEqual(client.baseURL.absoluteString, "http://192.168.1.20:8787")
+        XCTAssertEqual(client.accessToken, token)
+        try settings.removeToken(environment: .local)
+        XCTAssertThrowsError(try settings.makeClient())
     }
 
     func testInvalidInputAndKeychainFailureDoNotCommitSettings() throws {
@@ -80,7 +92,7 @@ final class AnalysisServiceSettingsTests: XCTestCase {
         }
     }
 
-    func testSavingLocalIgnoresInvalidRemoteDraftAndDoesNotWriteRemoteSecrets() throws {
+    func testSavingAuthenticatedLocalIgnoresInvalidRemoteDraft() throws {
         let (defaults, name) = preferences()
         defer { defaults.removePersistentDomain(forName: name) }
         let vault = MemoryAnalysisTokens()
@@ -90,14 +102,16 @@ final class AnalysisServiceSettingsTests: XCTestCase {
         draft.token = "short"
         draft.localAddress = "http://192.168.1.5:8787"
         draft.environment = .local
+        draft.token = token
         try draft.save(to: settings)
         XCTAssertEqual(try settings.makeClient().baseURL.absoluteString, "http://192.168.1.5:8787")
         XCTAssertEqual(settings.remoteAddress, "https://api.super-vivian.top")
-        XCTAssertTrue(vault.values.isEmpty)
+        XCTAssertEqual(vault.values["http://192.168.1.5:8787"], token)
+        XCTAssertNil(vault.values["https://unfinished/invalid-path"])
         draft.remoteAddress = "https://other.example.com"
         draft.token = token
         vault.fail = true
-        XCTAssertNoThrow(try draft.save(to: settings), "local mode must not depend on remote Keychain availability")
+        XCTAssertThrowsError(try draft.save(to: settings), "authenticated LAN mode must surface Keychain failure")
     }
 
     private func preferences() -> (UserDefaults, String) {

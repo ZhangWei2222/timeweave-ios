@@ -85,6 +85,26 @@ final class AIChatViewModelTests: XCTestCase {
         XCTAssertEqual(model.messages.last?.text, "远端新答案")
     }
 
+    func testSelectingAnotherConversationRejectsOldTurnResult() async throws {
+        let first = try conversation(id: "conv-a", title: "A")
+        let second = try conversation(id: "conv-b", title: "B", messages: [
+            #"{"id":"b1","turn_id":"turn-b","role":"assistant","text":"B 的内容","created_at":"2026-11-05T01:00:00Z"}"#
+        ])
+        let client = SwitchingChatClient(conversations: [first, second])
+        let model = AIChatViewModel(clientProvider: { client }, serviceScope: { "local" }, defaults: isolatedDefaults()) { try self.snapshot() }
+        await model.load()
+        model.draft = "A 的问题"
+        model.submit()
+        await client.waitForSubmission()
+
+        await model.selectConversation(id: second.id)
+        await client.finish(with: try turn(status: "completed", answer: "A 的旧答案", runID: "run-a"))
+        await settle()
+
+        XCTAssertEqual(model.currentConversation?.id, second.id)
+        XCTAssertEqual(model.messages.last?.text, "B 的内容")
+    }
+
     func testOldServerFallsBackToLegacyAnalysis() async throws {
         let client = ChatClientStub(capabilitiesError: AgentClientError.server(code: "not_found", message: "接口不存在", retryable: false, runID: nil), legacyAnswer: "旧接口答案")
         let model = AIChatViewModel(clientProvider: { client }, serviceScope: { "old" }, defaults: isolatedDefaults()) { try self.snapshot() }
@@ -98,6 +118,34 @@ final class AIChatViewModelTests: XCTestCase {
         XCTAssertEqual(model.messages.last?.text, "旧接口答案")
     }
 
+    func testCapabilitiesWithoutConversationsFallsBackToLegacy() async throws {
+        let client = ChatClientStub(capabilities: AgentCapabilities(schemaVersion: 1, conversations: false, memories: false), legacyAnswer: "兼容答案")
+        let model = AIChatViewModel(clientProvider: { client }, serviceScope: { "legacy-capabilities" }, defaults: isolatedDefaults()) { try self.snapshot() }
+
+        await model.load()
+
+        XCTAssertEqual(model.mode, .legacy)
+        XCTAssertNil(model.error)
+    }
+
+    func testLoadResumesServerActiveTurnAfterViewModelRecreation() async throws {
+        let running = try turn(status: "running", answer: nil, runID: "run-active")
+        let active = try conversation(id: "conv-1", title: "分析", turns: [running], activeTurnID: running.id)
+        let completedConversation = try conversation(id: "conv-1", title: "分析", messages: [
+            #"{"id":"m1","turn_id":"turn-1","role":"user","text":"分析","created_at":"2026-11-05T01:00:00Z"}"#,
+            #"{"id":"m2","turn_id":"turn-1","role":"assistant","text":"恢复后的答案","created_at":"2026-11-05T01:00:01Z"}"#
+        ])
+        let completed = try turn(status: "completed", answer: "恢复后的答案", runID: "run-active")
+        let client = ChatClientStub(conversations: [active], refreshedConversation: completedConversation, resumeResults: [.success(completed)])
+        let model = AIChatViewModel(clientProvider: { client }, serviceScope: { "local" }, defaults: isolatedDefaults()) { try self.snapshot() }
+
+        await model.load()
+        await waitUntil { !model.isLoading && model.messages.last?.text == "恢复后的答案" }
+
+        let resumedIDs = await client.resumedTurnIDs()
+        XCTAssertEqual(resumedIDs, [running.id])
+    }
+
     func testMemoryActionsUpdateAfterServerSuccess() async throws {
         let proposed = try memory(id: "memory-1", status: "proposed")
         let active = try memory(id: "memory-1", status: "active")
@@ -108,7 +156,11 @@ final class AIChatViewModelTests: XCTestCase {
 
         await model.confirmMemory(id: "memory-1")
         XCTAssertEqual(model.memories.first?.status, .active)
-        await model.deleteMemory(id: "memory-1")
+        await model.editMemory(id: "memory-1", kind: .goal, text: "每周减少晚间工作")
+        XCTAssertEqual(model.memories.first?.text, "每周减少晚间工作")
+        await model.setProactiveMemory(false)
+        XCTAssertFalse(model.memoryPreferences.proactiveEnabled)
+        await model.clearMemories()
         XCTAssertTrue(model.memories.isEmpty)
     }
 
@@ -123,9 +175,12 @@ final class AIChatViewModelTests: XCTestCase {
         return defaults
     }
 
-    private func conversation(id: String, title: String, messages: [String] = []) throws -> Conversation {
+    private func conversation(id: String, title: String, messages: [String] = [], turns: [ConversationTurn] = [], activeTurnID: String? = nil) throws -> Conversation {
         let messageJSON = "[" + messages.joined(separator: ",") + "]"
-        return try JSONDecoder().decode(Conversation.self, from: Data(#"{"conversation_id":"\#(id)","principal_id":"local","title":"\#(title)","revision":1,"messages":\#(messageJSON),"turns":[],"created_at":"2026-11-05T01:00:00Z","updated_at":"2026-11-05T01:00:00Z"}"#.utf8))
+        let turnData = try JSONEncoder().encode(turns)
+        let turnJSON = String(decoding: turnData, as: UTF8.self)
+        let activeJSON = activeTurnID.map { #", "active_turn_id":"\#($0)""# } ?? ""
+        return try JSONDecoder().decode(Conversation.self, from: Data(#"{"conversation_id":"\#(id)","principal_id":"local","title":"\#(title)","revision":1,"messages":\#(messageJSON),"turns":\#(turnJSON)\#(activeJSON),"created_at":"2026-11-05T01:00:00Z","updated_at":"2026-11-05T01:00:00Z"}"#.utf8))
     }
 
     private func turn(status: String, answer: String?, runID: String?) throws -> ConversationTurn {
@@ -158,6 +213,7 @@ private final class ChatSelection {
 }
 
 private actor ChatClientStub: AIChatService {
+    private let fixedCapabilities: AgentCapabilities
     private let capabilitiesError: Error?
     private var conversations: [Conversation]
     private var sendResults: [Result<ConversationTurn, Error>]
@@ -167,21 +223,27 @@ private actor ChatClientStub: AIChatService {
     private let legacyAnswer: String
     private var messageIDs: [String] = []
     private var requestedConversationID: String?
+    private var resumeResults: [Result<ConversationTurn, Error>]
+    private var resumedIDs: [String] = []
+    private var submitted = false
 
     init(conversations: [Conversation] = [], sendResults: [Result<ConversationTurn, Error>] = [], refreshedConversation: Conversation? = nil,
-         memories: [UserMemory] = [], confirmedMemory: UserMemory? = nil, capabilitiesError: Error? = nil, legacyAnswer: String = "legacy") {
+         resumeResults: [Result<ConversationTurn, Error>] = [], memories: [UserMemory] = [], confirmedMemory: UserMemory? = nil,
+         capabilities: AgentCapabilities = AgentCapabilities(schemaVersion: 1, conversations: true, memories: true), capabilitiesError: Error? = nil, legacyAnswer: String = "legacy") {
         self.conversations = conversations
         self.sendResults = sendResults
         self.refreshedConversation = refreshedConversation
         self.memories = memories
         self.confirmedMemory = confirmedMemory
         self.capabilitiesError = capabilitiesError
+        self.fixedCapabilities = capabilities
+        self.resumeResults = resumeResults
         self.legacyAnswer = legacyAnswer
     }
 
     func capabilities() async throws -> AgentCapabilities {
         if let capabilitiesError { throw capabilitiesError }
-        return AgentCapabilities(schemaVersion: 1, conversations: true, memories: true)
+        return fixedCapabilities
     }
     func listConversations() async throws -> [ConversationSummary] {
         conversations.map { ConversationSummary(id: $0.id, title: $0.title, updatedAt: $0.updatedAt) }
@@ -189,15 +251,17 @@ private actor ChatClientStub: AIChatService {
     func createConversation() async throws -> Conversation { conversations[0] }
     func getConversation(id: String) async throws -> Conversation {
         requestedConversationID = id
-        if let refreshedConversation, id == refreshedConversation.id { return refreshedConversation }
+        if let refreshedConversation, id == refreshedConversation.id, submitted || !resumedIDs.isEmpty { return refreshedConversation }
         return conversations.first { $0.id == id }!
     }
     func deleteConversation(id: String, deleteMemories: Bool) async throws { conversations.removeAll { $0.id == id } }
     func sendMessage(conversationID: String, messageID: String, question: String, periodDays: Int, snapshot: AnalysisSnapshot) async throws -> ConversationTurn {
         messageIDs.append(messageID)
+        submitted = true
         return try sendResults.removeFirst().get()
     }
     func cancelTurn(conversationID: String, turnID: String) async throws -> ConversationTurn { try sendResults[0].get() }
+    func resumeTurn(conversationID: String, turnID: String) async throws -> ConversationTurn { resumedIDs.append(turnID); return try resumeResults.removeFirst().get() }
     func listMemories() async throws -> [UserMemory] { memories }
     func confirmMemory(id: String) async throws -> UserMemory {
         let value = confirmedMemory!
@@ -206,11 +270,23 @@ private actor ChatClientStub: AIChatService {
     }
     func rejectMemory(id: String) async throws -> UserMemory { memories[0] }
     func deleteMemory(id: String) async throws { memories.removeAll { $0.id == id } }
+    func editMemory(id: String, kind: UserMemoryKind, text: String) async throws -> UserMemory {
+        let current = memories.first!
+        let data = try JSONEncoder().encode(current)
+        var object = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        object["kind"] = kind.rawValue; object["text"] = text
+        let edited = try JSONDecoder().decode(UserMemory.self, from: JSONSerialization.data(withJSONObject: object))
+        memories = [edited]; return edited
+    }
+    func clearMemories() async throws { memories = [] }
+    func memoryPreferences() async throws -> MemoryPreferences { MemoryPreferences(proactiveEnabled: true) }
+    func setProactiveMemory(_ enabled: Bool) async throws -> MemoryPreferences { MemoryPreferences(proactiveEnabled: enabled) }
     func analyze(question: String, snapshot: AnalysisSnapshot) async throws -> AnalysisResponse {
         AnalysisResponse(schemaVersion: 1, runID: "legacy-run", answer: legacyAnswer)
     }
     func submittedMessageIDs() -> [String] { messageIDs }
     func lastRequestedConversationID() -> String? { requestedConversationID }
+    func resumedTurnIDs() -> [String] { resumedIDs }
 }
 
 private actor DelayedChatClient: AIChatService {
@@ -228,10 +304,44 @@ private actor DelayedChatClient: AIChatService {
         return try await withCheckedThrowingContinuation { continuation = $0 }
     }
     func cancelTurn(conversationID: String, turnID: String) async throws -> ConversationTurn { fatalError() }
+    func resumeTurn(conversationID: String, turnID: String) async throws -> ConversationTurn { fatalError() }
     func listMemories() async throws -> [UserMemory] { [] }
     func confirmMemory(id: String) async throws -> UserMemory { fatalError() }
     func rejectMemory(id: String) async throws -> UserMemory { fatalError() }
     func deleteMemory(id: String) async throws {}
+    func editMemory(id: String, kind: UserMemoryKind, text: String) async throws -> UserMemory { fatalError() }
+    func clearMemories() async throws {}
+    func memoryPreferences() async throws -> MemoryPreferences { MemoryPreferences(proactiveEnabled: true) }
+    func setProactiveMemory(_ enabled: Bool) async throws -> MemoryPreferences { MemoryPreferences(proactiveEnabled: enabled) }
+    func analyze(question: String, snapshot: AnalysisSnapshot) async throws -> AnalysisResponse { fatalError() }
+    func waitForSubmission() async { for _ in 0..<1_000 { if submitted { return }; await Task.yield() } }
+    func finish(with turn: ConversationTurn) { continuation?.resume(returning: turn); continuation = nil }
+}
+
+private actor SwitchingChatClient: AIChatService {
+    private let conversations: [Conversation]
+    private var continuation: CheckedContinuation<ConversationTurn, Error>?
+    private var submitted = false
+    init(conversations: [Conversation]) { self.conversations = conversations }
+    func capabilities() async throws -> AgentCapabilities { AgentCapabilities(schemaVersion: 1, conversations: true, memories: true) }
+    func listConversations() async throws -> [ConversationSummary] { conversations.map { ConversationSummary(id: $0.id, title: $0.title, updatedAt: $0.updatedAt) } }
+    func createConversation() async throws -> Conversation { conversations[0] }
+    func getConversation(id: String) async throws -> Conversation { conversations.first { $0.id == id }! }
+    func deleteConversation(id: String, deleteMemories: Bool) async throws {}
+    func sendMessage(conversationID: String, messageID: String, question: String, periodDays: Int, snapshot: AnalysisSnapshot) async throws -> ConversationTurn {
+        submitted = true
+        return try await withCheckedThrowingContinuation { continuation = $0 }
+    }
+    func resumeTurn(conversationID: String, turnID: String) async throws -> ConversationTurn { fatalError() }
+    func cancelTurn(conversationID: String, turnID: String) async throws -> ConversationTurn { fatalError() }
+    func listMemories() async throws -> [UserMemory] { [] }
+    func confirmMemory(id: String) async throws -> UserMemory { fatalError() }
+    func rejectMemory(id: String) async throws -> UserMemory { fatalError() }
+    func deleteMemory(id: String) async throws {}
+    func editMemory(id: String, kind: UserMemoryKind, text: String) async throws -> UserMemory { fatalError() }
+    func clearMemories() async throws {}
+    func memoryPreferences() async throws -> MemoryPreferences { MemoryPreferences(proactiveEnabled: true) }
+    func setProactiveMemory(_ enabled: Bool) async throws -> MemoryPreferences { MemoryPreferences(proactiveEnabled: enabled) }
     func analyze(question: String, snapshot: AnalysisSnapshot) async throws -> AnalysisResponse { fatalError() }
     func waitForSubmission() async { for _ in 0..<1_000 { if submitted { return }; await Task.yield() } }
     func finish(with turn: ConversationTurn) { continuation?.resume(returning: turn); continuation = nil }

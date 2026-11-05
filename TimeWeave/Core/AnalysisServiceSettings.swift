@@ -11,8 +11,12 @@ enum AnalysisEnvironment: String, Codable, CaseIterable, Identifiable {
 /// Editable form state, kept separate from the last successfully saved settings.
 @MainActor
 struct AnalysisServiceDraft {
-    var environment: AnalysisEnvironment
-    var localAddress: String
+    var environment: AnalysisEnvironment {
+        didSet { if environment != oldValue { token = "" } }
+    }
+    var localAddress: String {
+        didSet { if localAddress != oldValue && environment == .local { token = "" } }
+    }
     var remoteAddress: String {
         didSet { if remoteAddress != oldValue { token = "" } }
     }
@@ -27,13 +31,17 @@ struct AnalysisServiceDraft {
         try service.save(environment: environment,
                          localAddress: environment == .local ? localAddress : service.localAddress,
                          remoteAddress: environment == .remote ? remoteAddress : service.remoteAddress,
-                         token: environment == .remote && !token.isEmpty ? token : nil)
+                         token: !token.isEmpty ? token : nil)
     }
 }
 
 struct AnalysisEndpoint {
     let url: URL
     var origin: String { url.absoluteString }
+    var isLoopback: Bool {
+        guard let host = url.host?.lowercased() else { return false }
+        return host == "localhost" || host == "::1" || host.hasPrefix("127.")
+    }
 
     init(address: String, environment: AnalysisEnvironment) throws {
         guard var parts = URLComponents(string: address.trimmingCharacters(in: .whitespacesAndNewlines)),
@@ -150,16 +158,17 @@ final class AnalysisServiceSettings: ObservableObject {
         }
     }
 
-    /// nil keeps the token for this exact remote origin. Empty input is invalid.
+    /// nil keeps an existing token for this exact origin. Remote origins require one; local origins allow none.
     func save(environment: AnalysisEnvironment, localAddress: String, remoteAddress: String, token: String?) throws {
         let local = try AnalysisEndpoint(address: localAddress, environment: .local)
         let remote = try AnalysisEndpoint(address: remoteAddress, environment: .remote)
         let data = try JSONEncoder().encode(Preferences(environment: environment, localAddress: local.origin, remoteAddress: remote.origin))
+        let selectedOrigin = environment == .local ? local.origin : remote.origin
         if let token {
             try Self.validateToken(token)
-            try tokens.write(token, origin: remote.origin)
-        } else if environment == .remote {
-            try Self.validateToken(requiredToken(origin: remote.origin))
+            try tokens.write(token, origin: selectedOrigin)
+        } else if environment == .remote || !local.isLoopback {
+            try Self.validateToken(requiredToken(origin: selectedOrigin))
         }
         defaults.set(data, forKey: preferencesKey)
         self.environment = environment
@@ -169,23 +178,31 @@ final class AnalysisServiceSettings: ObservableObject {
     }
 
     func removeRemoteToken() throws {
-        try tokens.delete(origin: AnalysisEndpoint(address: remoteAddress, environment: .remote).origin)
+        try removeToken(environment: .remote)
+    }
+
+    func removeToken(environment: AnalysisEnvironment) throws {
+        let address = environment == .local ? localAddress : remoteAddress
+        try tokens.delete(origin: AnalysisEndpoint(address: address, environment: environment).origin)
         revision += 1
     }
 
     func makeClient(session: URLSession? = nil) throws -> AgentClient {
         let endpoint = try AnalysisEndpoint(address: currentAddress, environment: environment)
         let token: String?
-        if environment == .remote {
+        if environment == .remote || !endpoint.isLoopback {
             token = try requiredToken(origin: endpoint.origin)
             try Self.validateToken(token!)
-        } else { token = nil }
+        } else {
+            token = try? tokens.read(origin: endpoint.origin)
+            if let token { try Self.validateToken(token) }
+        }
         return AgentClient(session: session ?? AgentClient.analysisSession, baseURL: endpoint.url, accessToken: token)
     }
 
     private func requiredToken(origin: String) throws -> String {
         guard let token = try tokens.read(origin: origin) else {
-            throw AgentClientError.configuration("请在服务设置中填写此远端地址的访问令牌（不是阿里云 AK 或百炼密钥）。")
+            throw AgentClientError.configuration("请在服务设置中填写此地址的访问令牌（不是阿里云 AK 或百炼密钥）。")
         }
         return token
     }

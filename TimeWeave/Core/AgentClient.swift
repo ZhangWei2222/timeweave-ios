@@ -145,6 +145,11 @@ struct UserMemory: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+struct MemoryPreferences: Codable, Equatable, Sendable {
+    let proactiveEnabled: Bool
+    enum CodingKeys: String, CodingKey { case proactiveEnabled = "proactive_enabled" }
+}
+
 protocol AgentAnalyzing: Sendable {
     func analyze(question: String, snapshot: AnalysisSnapshot) async throws -> AnalysisResponse
 }
@@ -156,11 +161,16 @@ protocol AgentConversing: Sendable {
     func getConversation(id: String) async throws -> Conversation
     func deleteConversation(id: String, deleteMemories: Bool) async throws
     func sendMessage(conversationID: String, messageID: String, question: String, periodDays: Int, snapshot: AnalysisSnapshot) async throws -> ConversationTurn
+    func resumeTurn(conversationID: String, turnID: String) async throws -> ConversationTurn
     func cancelTurn(conversationID: String, turnID: String) async throws -> ConversationTurn
     func listMemories() async throws -> [UserMemory]
     func confirmMemory(id: String) async throws -> UserMemory
     func rejectMemory(id: String) async throws -> UserMemory
     func deleteMemory(id: String) async throws
+    func editMemory(id: String, kind: UserMemoryKind, text: String) async throws -> UserMemory
+    func clearMemories() async throws
+    func memoryPreferences() async throws -> MemoryPreferences
+    func setProactiveMemory(_ enabled: Bool) async throws -> MemoryPreferences
 }
 
 enum AgentClientError: LocalizedError, Equatable, Sendable {
@@ -193,7 +203,7 @@ struct AgentClient: AgentAnalyzing, AgentConversing {
     static let analysisSession = URLSession(configuration: .ephemeral)
     let session: URLSession
     let baseURL: URL
-    private let accessToken: String?
+    let accessToken: String?
     init(session: URLSession = analysisSession, baseURL: URL = URL(string: "http://127.0.0.1:8787")!, accessToken: String? = nil) {
         self.session = session
         self.baseURL = baseURL
@@ -277,18 +287,40 @@ struct AgentClient: AgentAnalyzing, AgentConversing {
             enum CodingKeys: String, CodingKey { case schemaVersion = "schema_version", messageID = "message_id", question, periodDays = "period_days", snapshot }
         }
         let body = try JSONEncoder().encode(Request(messageID: messageID, question: question, periodDays: periodDays, snapshot: snapshot))
-        var turn = try await requestJSON(path: ["v1", "conversations", conversationID, "turns"], method: "POST", body: body, expectedStatus: [202], as: ConversationTurn.self)
-        for attempt in 0..<120 {
-            try validate(turn: turn)
-            if turn.status.isTerminal { return turn }
-            if attempt > 0 {
-                let milliseconds = min(2_000, 200 * (1 << min(attempt - 1, 3)))
-                try await Task.sleep(nanoseconds: UInt64(milliseconds) * 1_000_000)
+        let turn = try await requestJSON(path: ["v1", "conversations", conversationID, "turns"], method: "POST", body: body, expectedStatus: [202], as: ConversationTurn.self)
+        try validate(turn: turn)
+        if turn.status.isTerminal { return turn }
+        return try await pollTurn(conversationID: conversationID, turnID: turn.id)
+    }
+
+    func resumeTurn(conversationID: String, turnID: String) async throws -> ConversationTurn {
+        try await pollTurn(conversationID: conversationID, turnID: turnID)
+    }
+
+    private func pollTurn(conversationID: String, turnID: String) async throws -> ConversationTurn {
+        try await withThrowingTaskGroup(of: ConversationTurn.self) { group in
+            group.addTask {
+                var attempt = 0
+                while true {
+                    if attempt > 0 {
+                        let milliseconds = min(2_000, 200 * (1 << min(attempt - 1, 3)))
+                        try await Task.sleep(nanoseconds: UInt64(milliseconds) * 1_000_000)
+                    }
+                    try Task.checkCancellation()
+                    let turn = try await getJSON(path: ["v1", "conversations", conversationID, "turns", turnID], as: ConversationTurn.self)
+                    try validate(turn: turn)
+                    if turn.status.isTerminal { return turn }
+                    attempt += 1
+                }
             }
-            try Task.checkCancellation()
-            turn = try await getJSON(path: ["v1", "conversations", conversationID, "turns", turn.id], as: ConversationTurn.self)
+            group.addTask {
+                try await Task.sleep(nanoseconds: 120 * 1_000_000_000)
+                throw AgentClientError.transport(.timedOut)
+            }
+            defer { group.cancelAll() }
+            guard let result = try await group.next() else { throw AgentClientError.invalidResponse }
+            return result
         }
-        throw AgentClientError.transport(.timedOut)
     }
 
     func cancelTurn(conversationID: String, turnID: String) async throws -> ConversationTurn {
@@ -312,6 +344,24 @@ struct AgentClient: AgentAnalyzing, AgentConversing {
 
     func deleteMemory(id: String) async throws {
         try await requestEmpty(url: endpoint(["v1", "memories", id]), method: "DELETE", expectedStatus: [204])
+    }
+
+    func editMemory(id: String, kind: UserMemoryKind, text: String) async throws -> UserMemory {
+        struct Request: Encodable { let kind: UserMemoryKind; let text: String }
+        return try await requestJSON(path: ["v1", "memories", id], method: "PATCH", body: JSONEncoder().encode(Request(kind: kind, text: text)), expectedStatus: [200], as: UserMemory.self)
+    }
+
+    func clearMemories() async throws {
+        try await requestEmpty(url: endpoint(["v1", "memories"]), method: "DELETE", expectedStatus: [204])
+    }
+
+    func memoryPreferences() async throws -> MemoryPreferences {
+        try await getJSON(path: ["v1", "memory-settings"], as: MemoryPreferences.self)
+    }
+
+    func setProactiveMemory(_ enabled: Bool) async throws -> MemoryPreferences {
+        struct Request: Encodable { let proactive_enabled: Bool }
+        return try await requestJSON(path: ["v1", "memory-settings"], method: "PUT", body: JSONEncoder().encode(Request(proactive_enabled: enabled)), expectedStatus: [200], as: MemoryPreferences.self)
     }
 
     private func memoryAction(id: String, action: String) async throws -> UserMemory {

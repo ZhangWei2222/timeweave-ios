@@ -139,6 +139,13 @@ struct AIAnalysisView: View {
                 if message.role == .assistant {
                     Text("基于该轮提交时的已记录时间；未记录不代表没有发生。")
                         .font(.caption2).foregroundStyle(.secondary)
+                    if let changes = model.currentConversation?.turns.first(where: { $0.id == message.turnID })?.memoryChanges {
+                        ForEach(changes) { change in
+                            Label(change.status == .active ? "已记住：\(change.text)" : "待你确认：\(change.text)",
+                                  systemImage: change.status == .active ? "checkmark.circle" : "questionmark.circle")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
                 }
             }
             .padding(12)
@@ -198,10 +205,21 @@ struct AIAnalysisView: View {
 private struct MemoryManagementView: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var model: AIChatViewModel
+    @State private var editingMemory: UserMemory?
+    @State private var editText = ""
+    @State private var confirmingClear = false
 
     var body: some View {
         NavigationStack {
             List {
+                Section {
+                    Toggle("允许 AI 提出候选记忆", isOn: Binding(
+                        get: { model.memoryPreferences.proactiveEnabled },
+                        set: { enabled in Task { await model.setProactiveMemory(enabled) } }
+                    ))
+                } footer: {
+                    Text("关闭后，AI 不再主动提议；你明确说“记住……”仍然有效。")
+                }
                 if model.memories.isEmpty {
                     VStack(spacing: 10) {
                         Image(systemName: "brain").font(.largeTitle)
@@ -223,6 +241,8 @@ private struct MemoryManagementView: View {
                                 Label("敏感", systemImage: "lock").font(.caption).foregroundStyle(.orange)
                             }
                         }
+                        Text("来源：\(memory.origin == "explicit_user" ? "你明确要求" : "AI 候选") · \(memory.createdAt)")
+                            .font(.caption2).foregroundStyle(.secondary)
                         if memory.status == .proposed {
                             HStack {
                                 Button("确认记住") { Task { await model.confirmMemory(id: memory.id) } }
@@ -230,13 +250,34 @@ private struct MemoryManagementView: View {
                                 Button("不保存", role: .destructive) { Task { await model.rejectMemory(id: memory.id) } }
                             }
                         } else {
-                            Button("删除", role: .destructive) { Task { await model.deleteMemory(id: memory.id) } }
+                            HStack {
+                                Button("编辑") { editingMemory = memory; editText = memory.text }
+                                Button("删除", role: .destructive) { Task { await model.deleteMemory(id: memory.id) } }
+                            }
                         }
                     }.padding(.vertical, 4)
                 }
             }
             .navigationTitle("AI 对我的了解")
-            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    if !model.memories.isEmpty { Button("清空", role: .destructive) { confirmingClear = true } }
+                }
+                ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } }
+            }
+            .alert("编辑长期记忆", isPresented: Binding(get: { editingMemory != nil }, set: { if !$0 { editingMemory = nil } })) {
+                TextField("记忆内容", text: $editText)
+                Button("保存") {
+                    guard let memory = editingMemory else { return }
+                    Task { await model.editMemory(id: memory.id, kind: memory.kind, text: editText) }
+                    editingMemory = nil
+                }
+                Button("取消", role: .cancel) { editingMemory = nil }
+            }
+            .confirmationDialog("清空全部长期记忆？", isPresented: $confirmingClear, titleVisibility: .visible) {
+                Button("清空", role: .destructive) { Task { await model.clearMemories() } }
+                Button("取消", role: .cancel) {}
+            }
         }
     }
 }
@@ -277,8 +318,14 @@ private struct AnalysisServiceSettingsView: View {
                     Section {
                         addressField("本地服务地址", text: $draft.localAddress)
                             .accessibilityIdentifier("localServiceAddress")
+                        SecureField("局域网访问令牌（回环服务可留空）", text: $draft.token)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+                            .privacySensitive().accessibilityIdentifier("localAccessToken")
+                        if draft.localAddress == service.localAddress {
+                            Button("删除已保存的本地令牌", role: .destructive) { confirmingDelete = true }
+                        }
                     } header: { Text("本地服务") } footer: {
-                        Text("模拟器使用 127.0.0.1；真机请填 Mac 的局域网地址，并允许本地网络权限。手机的 127.0.0.1 指手机自己。Mac 服务还需监听对应内网接口并允许防火墙访问。")
+                        Text("模拟器使用 127.0.0.1；真机请填 Mac 的局域网地址并填写服务令牌。手机的 127.0.0.1 指手机自己。Mac 服务还需监听对应内网接口并允许防火墙访问。")
                     }
                 } else {
                     Section {
@@ -305,10 +352,10 @@ private struct AnalysisServiceSettingsView: View {
                     Button("保存", action: save).accessibilityIdentifier("saveAnalysisService")
                 }
             }
-            .confirmationDialog("删除 \(service.remoteAddress) 的访问令牌？", isPresented: $confirmingDelete, titleVisibility: .visible) {
+            .confirmationDialog("删除 \(draft.environment == .local ? service.localAddress : service.remoteAddress) 的访问令牌？", isPresented: $confirmingDelete, titleVisibility: .visible) {
                 Button("删除令牌", role: .destructive) {
                     do {
-                        try service.removeRemoteToken()
+                        try service.removeToken(environment: draft.environment)
                         didChange()
                         draft.token = ""
                         error = nil
