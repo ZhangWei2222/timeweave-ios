@@ -2,67 +2,48 @@ import SwiftUI
 
 @MainActor
 struct AIAnalysisView: View {
-    @StateObject private var model: AIAnalysisViewModel
+    @StateObject private var model: AIChatViewModel
     @StateObject private var service: AnalysisServiceSettings
     @State private var showingServiceSettings = false
+    @State private var showingMemories = false
+    @State private var confirmingConversationDeletion = false
     let period: Int
 
     init(period: Int, store: TimeStore) {
         self.period = period
         let service = AnalysisServiceSettings()
         _service = StateObject(wrappedValue: service)
-        _model = StateObject(wrappedValue: AIAnalysisViewModel(clientProvider: { try service.makeClient() }) {
-            try AnalysisSnapshotBuilder.build(ledger: store.ledger, period: period)
-        })
+        _model = StateObject(wrappedValue: AIChatViewModel(
+            clientProvider: { try service.makeClient() },
+            serviceScope: { service.currentAddress }
+        ) { try AnalysisSnapshotBuilder.build(ledger: store.ledger, period: period) })
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("当前服务：\(service.environment.title)").font(.subheadline.weight(.semibold))
-                    Text(service.currentAddress).font(.caption).foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                }.frame(maxWidth: .infinity, alignment: .leading)
-                Card {
-                    Label("近 \(period) 天 · 只读分析", systemImage: "sparkles").font(.headline)
-                    TextField("你想了解什么？", text: $model.question, axis: .vertical)
-                        .lineLimit(3...8).textFieldStyle(.roundedBorder)
-                        .disabled(model.isLoading).accessibilityIdentifier("analysisQuestion")
-                    Text("仅发送时间范围、分类和每日汇总及你的问题，经当前服务转交百炼。问题、分类名称和回答会保存在\(service.environment == .local ? "本地服务所在的 Mac" : "远端服务器")的私有日志中。不会发送记录明细或备注。")
-                        .font(.caption).foregroundStyle(.secondary)
-                    if model.question.unicodeScalars.count > 500 {
-                        Text("问题最多 500 字。请精简后再试。").font(.caption).foregroundStyle(.red)
-                    }
-                    Button(action: model.submit) {
-                        HStack {
-                            if model.isLoading { ProgressView() }
-                            Text(model.isLoading ? "正在分析…" : "开始分析")
-                        }.frame(maxWidth: .infinity)
-                    }.buttonStyle(.borderedProminent).disabled(!model.canSubmit)
-                        .accessibilityIdentifier("submitAnalysis")
-                }
-                if let error = model.error {
-                    Card {
-                        Label("暂时无法分析", systemImage: "exclamationmark.triangle").font(.headline)
-                        Text(error.localizedDescription).font(.subheadline)
-                        if error.retryable { Button("重试", action: model.submit).disabled(!model.canSubmit) }
-                    }.accessibilityIdentifier("analysisError")
-                }
-                if let response = model.response {
-                    Card {
-                        Label("分析结果", systemImage: "text.bubble").font(.headline)
-                        Text(response.answer).textSelection(.enabled)
-                        Text("基于提交时的已记录时间；未记录不代表没有发生。")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }.accessibilityIdentifier("analysisResult")
-                }
-            }.padding(20)
+        VStack(spacing: 0) {
+            serviceHeader
+            Divider()
+            timeline
+            Divider()
+            composer
         }
         .background(Palette.background)
         .navigationTitle("AI 时间分析")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            if model.mode == .chat {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button { Task { await model.newConversation() } } label: {
+                        Label("新对话", systemImage: "square.and.pencil")
+                    }.accessibilityIdentifier("newAnalysisConversation")
+                }
+                ToolbarItemGroup(placement: .navigationBarTrailing) {
+                    conversationMenu
+                    Button { showingMemories = true } label: {
+                        Label("AI 对我的了解", systemImage: "brain.head.profile")
+                    }.accessibilityIdentifier("analysisMemories")
+                }
+            }
             ToolbarItem(placement: .navigationBarTrailing) {
                 Button { showingServiceSettings = true } label: {
                     Label("服务设置", systemImage: "gearshape")
@@ -72,7 +53,197 @@ struct AIAnalysisView: View {
         .sheet(isPresented: $showingServiceSettings) {
             AnalysisServiceSettingsView(service: service, didChange: model.serviceConfigurationChanged)
         }
-        .onDisappear { model.cancel() }
+        .sheet(isPresented: $showingMemories) {
+            MemoryManagementView(model: model)
+        }
+        .confirmationDialog("删除当前对话？", isPresented: $confirmingConversationDeletion, titleVisibility: .visible) {
+            Button("删除对话", role: .destructive) { Task { await model.deleteCurrentConversation() } }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("对话记录会从当前分析服务删除；已经确认的长期记忆默认保留。")
+        }
+        .task { await model.load() }
+        .onDisappear { model.cancelPolling() }
+    }
+
+    private var serviceHeader: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack {
+                Text("当前服务：\(service.environment.title)").font(.subheadline.weight(.semibold))
+                Spacer()
+                Text("近 \(period) 天").font(.caption.weight(.medium)).foregroundStyle(.secondary)
+            }
+            Text(service.currentAddress).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            if model.mode == .legacy {
+                Label("当前服务不保存对话", systemImage: "exclamationmark.circle")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 16).padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var timeline: some View {
+        ScrollView {
+            LazyVStack(spacing: 12) {
+                if model.messages.isEmpty && model.error == nil {
+                    VStack(spacing: 10) {
+                        Image(systemName: "sparkles")
+                            .font(.largeTitle)
+                            .foregroundStyle(Palette.accent)
+                        Text("开始一段分析").font(.headline)
+                        Text("可以追问上一轮，也可以明确说“记住……”保存稳定目标。")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                        .padding(.top, 48)
+                }
+                ForEach(model.messages) { message in
+                    messageBubble(message)
+                }
+                if model.isLoading {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                        Text("Agent 正在分析…").font(.subheadline).foregroundStyle(.secondary)
+                        Spacer()
+                    }
+                    .padding(12).background(Palette.card).clipShape(RoundedRectangle(cornerRadius: 14))
+                    .accessibilityIdentifier("analysisPending")
+                }
+                if let error = model.error {
+                    Card {
+                        Label("暂时无法分析", systemImage: "exclamationmark.triangle").font(.headline)
+                        Text(error.localizedDescription).font(.subheadline)
+                        if model.mode == .loading {
+                            Button("重试") { Task { await model.load() } }
+                        } else if error.retryable {
+                            Button("重试", action: model.retry).disabled(!model.canSubmit)
+                        }
+                    }.accessibilityIdentifier("analysisError")
+                }
+            }
+            .padding(16)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityIdentifier("analysisTimeline")
+    }
+
+    private func messageBubble(_ message: ChatMessage) -> some View {
+        HStack {
+            if message.role == .user { Spacer(minLength: 48) }
+            VStack(alignment: .leading, spacing: 6) {
+                Text(message.role == .user ? "你" : "TimeWeave")
+                    .font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Text(message.text).textSelection(.enabled)
+                if message.role == .assistant {
+                    Text("基于该轮提交时的已记录时间；未记录不代表没有发生。")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            .padding(12)
+            .background(message.role == .user ? Palette.accent.opacity(0.15) : Palette.card)
+            .clipShape(RoundedRectangle(cornerRadius: 14))
+            .accessibilityIdentifier(message.role == .user ? "userMessage" : "assistantMessage")
+            if message.role == .assistant { Spacer(minLength: 48) }
+        }
+    }
+
+    private var composer: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            TextField("继续追问，或说“记住……”", text: $model.draft, axis: .vertical)
+                .lineLimit(2...6).textFieldStyle(.roundedBorder)
+                .disabled(model.isLoading || model.mode == .loading)
+                .accessibilityIdentifier("analysisComposer")
+            HStack {
+                Text("只发送聚合统计，不发送记录明细或备注。")
+                    .font(.caption2).foregroundStyle(.secondary)
+                Spacer()
+                Button(action: model.submit) {
+                    Label(model.isLoading ? "分析中" : "发送", systemImage: "arrow.up.circle.fill")
+                }
+                .buttonStyle(.borderedProminent).disabled(!model.canSubmit)
+                .accessibilityIdentifier("sendAnalysisMessage")
+            }
+            if model.draft.unicodeScalars.count > 500 {
+                Text("问题最多 500 字。请精简后再试。").font(.caption).foregroundStyle(.red)
+            }
+        }
+        .padding(12).background(Palette.card)
+    }
+
+    private var conversationMenu: some View {
+        Menu {
+            ForEach(model.conversations) { conversation in
+                Button {
+                    Task { await model.selectConversation(id: conversation.id) }
+                } label: {
+                    if conversation.id == model.currentConversation?.id {
+                        Label(conversation.title, systemImage: "checkmark")
+                    } else {
+                        Text(conversation.title)
+                    }
+                }
+            }
+            Divider()
+            Button("删除当前对话", role: .destructive) { confirmingConversationDeletion = true }
+        } label: {
+            Label("对话", systemImage: "bubble.left.and.bubble.right")
+        }
+        .accessibilityIdentifier("analysisConversations")
+    }
+}
+
+@MainActor
+private struct MemoryManagementView: View {
+    @Environment(\.dismiss) private var dismiss
+    @ObservedObject var model: AIChatViewModel
+
+    var body: some View {
+        NavigationStack {
+            List {
+                if model.memories.isEmpty {
+                    VStack(spacing: 10) {
+                        Image(systemName: "brain").font(.largeTitle)
+                        Text("还没有长期记忆").font(.headline)
+                        Text("你可以在对话中说“记住……”，也可以确认 AI 提出的候选。")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .listRowBackground(Color.clear)
+                }
+                ForEach(model.memories) { memory in
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(memory.text)
+                        HStack {
+                            Text(memory.kind.title).font(.caption).foregroundStyle(.secondary)
+                            if memory.sensitivity == .sensitive {
+                                Label("敏感", systemImage: "lock").font(.caption).foregroundStyle(.orange)
+                            }
+                        }
+                        if memory.status == .proposed {
+                            HStack {
+                                Button("确认记住") { Task { await model.confirmMemory(id: memory.id) } }
+                                    .buttonStyle(.borderedProminent)
+                                Button("不保存", role: .destructive) { Task { await model.rejectMemory(id: memory.id) } }
+                            }
+                        } else {
+                            Button("删除", role: .destructive) { Task { await model.deleteMemory(id: memory.id) } }
+                        }
+                    }.padding(.vertical, 4)
+                }
+            }
+            .navigationTitle("AI 对我的了解")
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } } }
+        }
+    }
+}
+
+private extension UserMemoryKind {
+    var title: String {
+        switch self { case .goal: "目标"; case .preference: "偏好"; case .constraint: "约束" }
     }
 }
 
@@ -120,7 +291,7 @@ private struct AnalysisServiceSettingsView: View {
                             Button("删除已保存的远端令牌", role: .destructive) { confirmingDelete = true }
                         }
                     } header: { Text("远端服务") } footer: {
-                        Text("只填 HTTPS 主机地址及可选端口，不加 /v1/analysis。这里使用服务访问令牌，不是阿里云 AK 或百炼密钥；令牌仅保存在设备钥匙串，换地址需重新填写。预填域名不表示入口已开通：目前 ECS 仅监听服务器回环地址，真机仍需安全网络通道。")
+                        Text("只填 HTTPS 主机地址及可选端口，不加接口路径。这里使用 Agent 服务访问令牌，不是阿里云 AK 或百炼密钥；令牌仅保存在设备钥匙串，换地址需重新填写。远端服务必须配置访问令牌和 HTTPS。")
                     }
                 }
                 if let error { Section { Text(error).foregroundStyle(.red).accessibilityIdentifier("serviceSettingsError") } }

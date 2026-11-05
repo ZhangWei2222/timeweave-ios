@@ -114,10 +114,9 @@ final class LocalAnalysisUITests: XCTestCase {
         app.launch()
         app.tabBars.buttons["统计"].tap()
         app.buttons["AI 分析近 7 天"].tap()
-        app.buttons["submitAnalysis"].tap()
+        XCTAssertTrue(app.otherElements["analysisTimeline"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["暂时无法分析"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.buttons["重试"].exists)
-        XCTAssertTrue(app.buttons["submitAnalysis"].isEnabled)
     }
     @MainActor
     func testSnapshotAnalysisReachesServerAndDisplaysAnswer() throws {
@@ -127,9 +126,13 @@ final class LocalAnalysisUITests: XCTestCase {
         app.launch()
         app.tabBars.buttons["统计"].tap()
         app.buttons["AI 分析近 7 天"].tap()
-        XCTAssertTrue(app.buttons["submitAnalysis"].waitForExistence(timeout: 5))
-        app.buttons["submitAnalysis"].tap()
-        XCTAssertTrue(app.staticTexts["分析结果"].waitForExistence(timeout: 40), app.debugDescription)
+        XCTAssertTrue(app.otherElements["analysisTimeline"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.textFields["analysisComposer"].exists)
+        XCTAssertTrue(app.buttons["sendAnalysisMessage"].exists)
+        XCTAssertTrue(app.buttons["newAnalysisConversation"].exists)
+        XCTAssertTrue(app.buttons["analysisMemories"].exists)
+        app.buttons["sendAnalysisMessage"].tap()
+        XCTAssertTrue(app.otherElements["assistantMessage"].waitForExistence(timeout: 40), app.debugDescription)
         XCTAssertFalse(app.staticTexts["暂时无法分析"].exists)
         let screenshot = XCTAttachment(screenshot: app.screenshot())
         screenshot.lifetime = .keepAlways
@@ -152,8 +155,8 @@ final class LocalAnalysisUITests: XCTestCase {
         XCTAssertNotEqual(savedDuration.label, "不足 1 分钟")
         app.tabBars.buttons["统计"].tap()
         app.buttons["AI 分析近 7 天"].tap()
-        app.buttons["submitAnalysis"].tap()
-        XCTAssertTrue(app.staticTexts["分析结果"].waitForExistence(timeout: 40), app.debugDescription)
+        app.buttons["sendAnalysisMessage"].tap()
+        XCTAssertTrue(app.otherElements["assistantMessage"].waitForExistence(timeout: 40), app.debugDescription)
         let recorded = XCTAttachment(screenshot: app.screenshot())
         recorded.lifetime = .keepAlways
         add(recorded)
