@@ -102,6 +102,105 @@ final class AgentClientTests: XCTestCase, @unchecked Sendable {
             XCTFail("followed the redirect and leaked the analysis to /leak")
         } catch let error as AgentClientError { XCTAssertEqual(error, .invalidResponse) }
     }
+
+    func testConversationClientDiscoversCapabilitiesAndCreatesConversation() async throws {
+        let token = String(repeating: "r", count: 32)
+        let client = AgentClient(session: stubSession(), baseURL: URL(string: "https://agent.example.com")!, accessToken: token)
+        StubURLProtocol.set { request in
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer " + token)
+            switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/v1/capabilities"):
+                return (200, Data(#"{"schema_version":1,"conversations":true,"memories":true}"#.utf8))
+            case ("POST", "/v1/conversations"):
+                XCTAssertEqual(try requestBodyData(request), Data("{}".utf8))
+                return (201, Data(#"{"conversation_id":"conv-1","principal_id":"remote","title":"新对话","revision":1,"messages":[],"turns":[],"created_at":"2026-11-05T01:00:00Z","updated_at":"2026-11-05T01:00:00Z"}"#.utf8))
+            default:
+                XCTFail("unexpected request \(request.httpMethod ?? "") \(request.url?.absoluteString ?? "")")
+                return (500, Data())
+            }
+        }
+
+        let capabilities = try await client.capabilities()
+        XCTAssertTrue(capabilities.conversations)
+        XCTAssertTrue(capabilities.memories)
+        let conversation = try await client.createConversation()
+        XCTAssertEqual(conversation.id, "conv-1")
+        XCTAssertEqual(conversation.messages, [])
+    }
+
+    func testConversationClientSubmitsStableMessageAndPollsToCompletion() async throws {
+        let client = AgentClient(session: stubSession())
+        let getCount = LockedCounter()
+        StubURLProtocol.set { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v1/conversations/conv-1/turns"):
+                let object = try JSONSerialization.jsonObject(with: requestBodyData(request)) as! [String: Any]
+                XCTAssertEqual(object["schema_version"] as? Int, 1)
+                XCTAssertEqual(object["message_id"] as? String, "message-stable")
+                XCTAssertEqual(object["question"] as? String, "继续分析")
+                XCTAssertEqual(object["period_days"] as? Int, 7)
+                XCTAssertNotNil(object["snapshot"] as? [String: Any])
+                return (202, Data(#"{"turn_id":"turn-1","conversation_id":"conv-1","message_id":"message-stable","thread_id":"thread-turn-1","question":"继续分析","period_days":7,"status":"accepted","created_at":"2026-11-05T01:00:00Z","updated_at":"2026-11-05T01:00:00Z"}"#.utf8))
+            case ("GET", "/v1/conversations/conv-1/turns/turn-1"):
+                getCount.increment()
+                return (200, Data(#"{"turn_id":"turn-1","conversation_id":"conv-1","message_id":"message-stable","thread_id":"thread-turn-1","question":"继续分析","period_days":7,"status":"completed","run_id":"run-1","answer":"工作 60 分钟","memory_changes":[],"created_at":"2026-11-05T01:00:00Z","updated_at":"2026-11-05T01:00:01Z"}"#.utf8))
+            default:
+                XCTFail("unexpected request \(request.httpMethod ?? "") \(request.url?.absoluteString ?? "")")
+                return (500, Data())
+            }
+        }
+
+        let turn = try await client.sendMessage(conversationID: "conv-1", messageID: "message-stable", question: "继续分析", periodDays: 7, snapshot: snapshot())
+
+        XCTAssertEqual(getCount.value, 1)
+        XCTAssertEqual(turn.status, .completed)
+        XCTAssertEqual(turn.answer, "工作 60 分钟")
+        XCTAssertEqual(turn.runID, "run-1")
+    }
+
+    func testConversationClientRejectsMalformedTerminalTurn() async throws {
+        let client = AgentClient(session: stubSession())
+        StubURLProtocol.set { request in
+            if request.httpMethod == "POST" {
+                return (202, Data(#"{"turn_id":"turn-1","conversation_id":"conv-1","message_id":"message-1","thread_id":"thread-turn-1","question":"分析","period_days":7,"status":"accepted","created_at":"2026-11-05T01:00:00Z","updated_at":"2026-11-05T01:00:00Z"}"#.utf8))
+            }
+            return (200, Data(#"{"turn_id":"turn-1","conversation_id":"conv-1","message_id":"message-1","thread_id":"thread-turn-1","question":"分析","period_days":7,"status":"completed","answer":" ","created_at":"2026-11-05T01:00:00Z","updated_at":"2026-11-05T01:00:01Z"}"#.utf8))
+        }
+
+        do {
+            _ = try await client.sendMessage(conversationID: "conv-1", messageID: "message-1", question: "分析", periodDays: 7, snapshot: snapshot())
+            XCTFail("accepted malformed terminal turn")
+        } catch let error as AgentClientError {
+            XCTAssertEqual(error, .invalidResponse)
+        }
+    }
+
+    private func stubSession() -> URLSession {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [StubURLProtocol.self]
+        return URLSession(configuration: config)
+    }
+}
+
+private func requestBodyData(_ request: URLRequest) throws -> Data {
+    var body = request.httpBody ?? Data()
+    if let stream = request.httpBodyStream {
+        stream.open(); defer { stream.close() }
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            if count <= 0 { break }
+            body.append(buffer, count: count)
+        }
+    }
+    return body
+}
+
+private final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored = 0
+    var value: Int { lock.lock(); defer { lock.unlock() }; return stored }
+    func increment() { lock.lock(); stored += 1; lock.unlock() }
 }
 
 /// Real loopback HTTP boundary: following the 307 returns a valid but wrong answer.
