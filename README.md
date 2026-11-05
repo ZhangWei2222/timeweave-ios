@@ -1,6 +1,6 @@
 # TimeWeave · 时序
 
-一个使用 SwiftUI 构建的原生 iOS 时间记录应用，支持 iOS 16 及以上。无需账号、后端或第三方依赖。
+一个使用 SwiftUI 构建的原生 iOS 时间记录应用，支持 iOS 16 及以上。核心记录功能无需账号、后端或第三方依赖；AI 分析可选连接独立的 selfweave-agent 服务。
 
 ## 已实现
 
@@ -24,23 +24,34 @@
 
 真机运行：在 Xcode 的 Settings > Accounts 登录 Apple 账户，连接并信任 iPhone，启用开发者模式，在 Signing & Capabilities 选择自己的 Team，选择该手机后运行。工程不包含个人签名身份。
 
-## V2 AI 时间分析
+## V4 AI 多轮时间分析
 
-在 Mac 的 `selfweave-agent` 仓库设置 `SELFWEAVE_MODEL_BASE_URL`、`SELFWEAVE_MODEL_API_KEY`、`SELFWEAVE_MODEL_NAME`，运行 `go run ./cmd/selfweave-server`。在 iOS Simulator 打开「统计 → AI 分析近 7／30 天」，输入问题后提交。
+在 Mac 的 `selfweave-agent` 仓库设置 `SELFWEAVE_MODEL_BASE_URL`、`SELFWEAVE_MODEL_API_KEY`、`SELFWEAVE_MODEL_NAME`，运行 `go run ./cmd/selfweave-server`。在 App 打开「统计 → AI 分析近 7／30 天」即可连续追问、新建或删除对话，并管理 AI 提议的长期记忆。
 
-App 默认连接 `http://127.0.0.1:8787/v1/analysis`，发送统计范围、时区、总分钟、分类名称/分钟、每日日期/分钟和问题。不会发送原始记录、备注或 UUID；百炼密钥只保存在服务端。问题和聚合数据会发送给百炼，并写入当前服务所在机器的私有运行日志。
+App 默认连接 `http://127.0.0.1:8787`，发送统计范围、时区、总分钟、分类名称/分钟、每日日期/分钟和问题。不会发送原始记录、备注或 UUID；模型密钥只保存在服务端。问题、聚合数据、对话与运行证据会保存在当前服务所在机器的私有状态目录。
 
-每次分析独立，不保留聊天上下文；出错后可手动重试。默认 35 秒客户端超时，Go 分析超时 30 秒。看到连接错误时，先核对分析页显示的环境和地址。
+服务端持久保存 Conversation；每次提问创建独立 Turn，并在 V3 长任务运行时中使用独立 Thread。模型收到已确认记忆、较早历史摘要、最近消息和当前问题，但本轮统计事实必须重新读取当前快照。重复提交使用稳定 `message_id`，不会重复执行同一轮。旧版服务仍可回退到单轮 `/v1/analysis`。
+
+先读 [对话上下文学习指南](docs/conversational-context-learning-guide.md)，它沿真实请求链解释 Conversation／Turn／Thread／Run、幂等、上下文投影、受控记忆、远端身份与崩溃恢复，不要求学习 Go 语法。详细取舍见 [技术方案](docs/superpowers/specs/2026-11-04-conversational-context-memory-design.md)，iOS 实施步骤见 [实现计划](docs/superpowers/plans/2026-11-05-conversational-chat-ui.md)。Agent 端实现计划位于 `selfweave-agent/docs/superpowers/plans/2026-11-05-conversational-context.md`。
 
 ### 本地／远端开关
 
 进入「统计 → AI 分析近 7／30 天 → 右上角服务设置」，选择本地或远端并保存。两边地址分别保存，每次只提交当前选中环境；另一环境的未保存草稿不影响当前环境。选择跨重启保留，不用重新编译；失败不会自动切到另一边。保存配置会取消在途请求并清空旧结果，但不能撤回服务端已收到的分析。
 
 - 本地：默认 `http://127.0.0.1:8787`，适合模拟器访问 Mac。真机与 Mac 在同一可信局域网时可改为 `http://<Mac 的内网 IP>:8787` 或 `.local` 主机名；需要允许 App 本地网络权限，并让 Mac 服务监听该内网接口、配置防火墙。默认只监听回环的服务不会因此自动对手机开放。不要将无鉴权本地服务暴露到公网。
-- 远端：填写 HTTPS 服务地址和该服务的访问令牌；地址只填协议、主机及可选端口，不加 `/v1/analysis`。默认预填 `https://api.super-vivian.top` **不表示公网入口已开通**：当前 ECS 服务仅监听服务器 `127.0.0.1:8787`，需要后续建立安全网络通道才能从手机直接访问。
+- 远端：填写 HTTPS 服务地址和该服务的访问令牌；地址只填协议、主机及可选端口，不加接口路径。Agent 配置有效令牌后才允许监听非回环地址；公网 TLS 应由反向代理终止，不要把明文服务端口直接暴露到公网。
 - 令牌：填写的是 selfweave 服务的 Bearer 令牌，**不是阿里云 AK，也不是百炼 API Key**。仅保存在当前设备钥匙串，不在设置里回显；空输入表示保留该地址已有令牌。编辑远端地址会立即清空输入框中的令牌草稿；更换域名、协议或非默认端口后需重新提供对应令牌，不会把旧地址令牌发给新地址。可在设置中显式删除已保存的令牌。
 
 所有请求拒绝 HTTP 重定向；远端不支持明文 HTTP，不绕过 TLS 证书校验。UserDefaults 仅保存环境与地址；Keychain 使用设备本地、解锁时可用的保护，不通过 iCloud 同步。重新安装可能仍保留同签名 App 的钥匙串条目，需要撤销时显式删除或轮换服务端令牌。
+
+远端服务的产品级启动方式：
+
+```sh
+export SELFWEAVE_SERVER_ACCESS_TOKEN="至少32个可见ASCII字符的随机令牌"
+go run ./cmd/selfweave-server --listen 0.0.0.0:8787 --state-dir .selfweave
+```
+
+同一部署的 Token 对应稳定的远端数据空间，轮换 Token 不改变已有对话归属。当前没有账号系统或跨服务自动同步。
 
 测试设置页的远端令牌功能时应使用签名的模拟器构建（Xcode 默认即可）；`CODE_SIGNING_ALLOWED=NO` 仅用于编译检查，未签名 App 调用 Keychain 会报 `-34018`。模拟器 UI 验证可指定 `CODE_SIGN_IDENTITY=- CODE_SIGNING_ALLOWED=YES DEVELOPMENT_TEAM=<自己的 Team>`；不要关闭钥匙串保护来迁就未签名测试。
 
