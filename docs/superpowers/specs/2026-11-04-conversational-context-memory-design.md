@@ -236,7 +236,7 @@ Snapshot 作为不可变对象先落盘，再由 Turn 引用。Conversation 可�
 6. V3 Coordinator 执行模型—工具循环；每次模型调用和工具调用沿用 V3 的预算预留、Checkpoint 和回执协议。
 7. 模型给出候选回答后，CompletionEvaluator 至少检查：已成功读取 Snapshot、回答非空、记忆工具调用符合策略。
 8. Turn 完成后，在 Conversation 锁内校验起始 `context_revision` 仍有效，原子追加用户消息和最终回答，提交 memory changes，清除 active Turn。
-9. 创建 Turn 的 API 在持久化 accepted 状态后返回 `202 + turn_id`；iOS 通过 GET Turn 查询，直到获得 `run_id + answer + memory_changes`。首期使用有退避的短轮询，后续可增加 SSE，但不改变领域协议。
+9. 创建 Turn 的 API 在持久化 accepted 状态后返回 `202 + turn_id`。首期 iOS 使用有退避的短轮询；正式形态以 SSE 长连接主动推送状态、过程事件和最终结果，GET Turn 继续承担断线恢复、App 回到前台和不支持 SSE 时的兜底。传输方式的演进不改变 Turn 领域协议。
 10. HTTP 取消只终止当前等待/查询，不取消已经 accepted 的 Turn；显式“停止”才请求取消 Turn。客户端重新提交相同 `message_id` 时只返回原 Turn，不重复付费执行已经提交的步骤。
 
 Conversation 不绑定 7 天或 30 天周期。每个 Turn 单独记录本轮周期和 Snapshot revision，允许用户在同一对话中切换周期。当前 Snapshot 不足以回答比较问题时，Agent 必须说明缺少哪段事实并引导用户切换到能覆盖该范围的周期；首期不得静默扩大上传范围，也不改造 Snapshot 数据维度。跨周分类比较等现有聚合契约无法支持的问题应明确拒绝推断，留给后续查询型 Tool 设计。
@@ -336,6 +336,7 @@ DELETE /v1/conversations/{conversation_id}
 
 POST   /v1/conversations/{conversation_id}/turns
 GET    /v1/conversations/{conversation_id}/turns/{turn_id}
+GET    /v1/conversations/{conversation_id}/turns/{turn_id}/events
 POST   /v1/conversations/{conversation_id}/turns/{turn_id}/cancel
 
 GET    /v1/memories
@@ -392,6 +393,18 @@ Turn 请求示意：
   ]
 }
 ```
+
+`GET Turn /events` 使用 `text/event-stream`。连接建立后立即发送当前 Turn 的完整公开状态，此后仅在状态变化时发送新的完整快照，并在终态后关闭：
+
+```text
+event: turn
+data: {"turn_id":"turn-...","status":"running",...}
+
+event: turn
+data: {"turn_id":"turn-...","status":"completed","answer":"...",...}
+```
+
+这是状态快照流，不是独立事实源：客户端断线后重新连接即可先获得最新状态，不要求回放每个中间事件；GET Turn 仍是恢复和兼容兜底。当前模型边界只产生完整候选回答，因此首版不承诺逐 Token 的 `delta` 事件。
 
 稳定错误至少包括：`conversation_not_found`、`conversation_busy`、`turn_not_found`、`memory_not_found`、`snapshot_invalid`、`model_unavailable`、`analysis_timeout`、`needs_attention`。
 
