@@ -27,7 +27,7 @@ Agent Conversation Service ──持久化──> Conversation / Turn / Memory
            ▼
 Turn completed + assistant message
            ▲
-           └── iOS GET 轮询，最后刷新服务端完整 Conversation
+           └── SSE 推送终态；断线时 GET 恢复，最后刷新完整 Conversation
 ```
 
 这里最重要的判断是：**iOS 负责交互，Agent 服务负责事实状态，模型只负责基于被允许的上下文做推理。**
@@ -162,22 +162,35 @@ AI 自己观察到的稳定信息            → 只能 proposed，等用户确�
 
 删除对话默认保留已经确认的长期记忆，因为用户删除聊天不一定等于撤销长期目标；候选记忆会随来源对话删除。界面支持确认、拒绝、编辑、单条删除、一键清空，以及关闭 AI 主动候选。删除正文会从服务状态中实际移除，不只做隐藏标记。
 
-## 6. 为什么提交后返回 202，再由 iOS 轮询
+## 6. 为什么提交后返回 202，再由 SSE 推送
 
 模型调用可能持续数秒甚至更久。让一个 HTTP 请求一直挂着，会把移动网络波动误当成任务失败。
 
-当前协议把“接受任务”和“完成任务”拆开：
+当前协议把“接受任务”和“等待结果”拆开：
 
 ```text
 POST Turn
   └─ 202 + turn_id + accepted/running
 
-GET Turn
-  ├─ accepted/running：继续等
-  └─ completed/paused/needs_attention/cancelled：停止轮询
+GET Turn /events（SSE）
+  ├─ 连接后立即发送当前 Turn
+  ├─ 状态变化时推送新的完整 Turn
+  └─ completed/paused/needs_attention/cancelled：发送后关闭
 ```
 
-iOS 采用逐步放慢、最长约两分钟的轮询。用户退出页面时只停止客户端轮询，不会假装撤回服务端已收到的请求；协议另有明确 cancel 接口。
+SSE 是主要等待方式。旧服务不支持 SSE、连接中断或 App 从后台恢复时，iOS 会改用逐步放慢的 GET Turn 轮询；它不会重新 POST，因此不会重复创建或付费执行同一个 Turn。用户退出页面只停止客户端等待，不会撤回服务端已经接受的任务；只有明确调用 cancel 接口才会取消。
+
+```text
+POST Turn → 202 + turn_id
+                  ↓
+         建立 SSE 长连接
+                  ↓
+服务端推送 accepted → running → completed
+                  ↓
+       断线时用 GET Turn 恢复
+```
+
+这里的 SSE 是**状态流**，不是逐字输出流。每个事件携带一个完整的公开 Turn，所以客户端错过中间事件也可以用最新状态恢复；当前模型接口只返回完整候选回答，因此回答会在 `completed` 事件中一次出现。以后若模型层支持增量输出，可以在同一 SSE 通道增加 `delta` 事件，不需要改变 `202 + turn_id` 和持久化协议。
 
 这是一条可复用原则：**长任务的状态必须可查询，不能只依赖最初那条连接。**
 
