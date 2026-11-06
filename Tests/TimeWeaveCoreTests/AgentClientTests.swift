@@ -212,6 +212,34 @@ final class AgentClientTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(turn.runID, "run-1")
     }
 
+    func testConversationClientRejectsOversizedMultiLineEventAndRecoversWithGET() async throws {
+        let client = AgentClient(session: stubSession())
+        let pollCount = LockedCounter()
+        let terminal = #"{"turn_id":"turn-1","conversation_id":"conv-1","message_id":"message-stable","thread_id":"thread-turn-1","question":"继续分析","period_days":7,"status":"completed","run_id":"run-sse","answer":"不应接受的超大事件","memory_changes":[],"created_at":"2026-11-05T01:00:00Z","updated_at":"2026-11-05T01:00:01Z"}"#
+        let oneMiBOfJSONWhitespace = String(repeating: "\t", count: 1024 * 1024)
+        let oversizedEvent = "event: turn\ndata: \(terminal)\n" + String(repeating: "data:\(oneMiBOfJSONWhitespace)\n", count: 5) + "\n"
+        StubURLProtocol.set { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v1/conversations/conv-1/turns"):
+                return (202, Data(#"{"turn_id":"turn-1","conversation_id":"conv-1","message_id":"message-stable","thread_id":"thread-turn-1","question":"继续分析","period_days":7,"status":"accepted","created_at":"2026-11-05T01:00:00Z","updated_at":"2026-11-05T01:00:00Z"}"#.utf8))
+            case ("GET", "/v1/conversations/conv-1/turns/turn-1/events"):
+                return (200, Data(oversizedEvent.utf8))
+            case ("GET", "/v1/conversations/conv-1/turns/turn-1"):
+                pollCount.increment()
+                return (200, Data(#"{"turn_id":"turn-1","conversation_id":"conv-1","message_id":"message-stable","thread_id":"thread-turn-1","question":"继续分析","period_days":7,"status":"completed","run_id":"run-get","answer":"GET 恢复答案","memory_changes":[],"created_at":"2026-11-05T01:00:00Z","updated_at":"2026-11-05T01:00:02Z"}"#.utf8))
+            default:
+                XCTFail("unexpected request \(request.httpMethod ?? "") \(request.url?.path ?? "")")
+                return (500, Data())
+            }
+        }
+
+        let turn = try await client.sendMessage(conversationID: "conv-1", messageID: "message-stable", question: "继续分析", periodDays: 7, snapshot: snapshot())
+
+        XCTAssertEqual(pollCount.value, 1)
+        XCTAssertEqual(turn.runID, "run-get")
+        XCTAssertEqual(turn.answer, "GET 恢复答案")
+    }
+
     func testConversationClientRejectsMalformedTerminalTurn() async throws {
         let client = AgentClient(session: stubSession())
         StubURLProtocol.set { request in

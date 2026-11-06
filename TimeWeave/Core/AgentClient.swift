@@ -498,8 +498,11 @@ struct AgentClient: AgentAnalyzing, AgentConversing {
 }
 
 private struct TurnEventStreamDecoder {
+    private static let maxDataBytes = 4 * 1024 * 1024
+
     private var event: String?
     private var dataLines: [String] = []
+    private var dataBytes = 0
 
     mutating func consume(line: String) throws -> ConversationTurn? {
         if line.isEmpty {
@@ -518,7 +521,15 @@ private struct TurnEventStreamDecoder {
         }
         switch field {
         case "event": event = String(value)
-        case "data": dataLines.append(String(value))
+        case "data":
+            let text = String(value)
+            let additionalBytes = text.utf8.count + (dataLines.isEmpty ? 0 : 1)
+            guard additionalBytes <= Self.maxDataBytes,
+                  dataBytes <= Self.maxDataBytes - additionalBytes else {
+                throw AgentClientError.invalidResponse
+            }
+            dataBytes += additionalBytes
+            dataLines.append(text)
         default: break
         }
         return nil
@@ -532,6 +543,7 @@ private struct TurnEventStreamDecoder {
         defer {
             event = nil
             dataLines.removeAll(keepingCapacity: true)
+            dataBytes = 0
         }
         guard event == nil || event == "turn" else { return nil }
         guard !dataLines.isEmpty else { return nil }
