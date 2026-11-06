@@ -128,12 +128,61 @@ final class AgentClientTests: XCTestCase, @unchecked Sendable {
         XCTAssertEqual(conversation.messages, [])
     }
 
-    func testConversationClientSubmitsStableMessageAndPollsToCompletion() async throws {
+    func testConversationClientStreamsTurnToCompletionWithoutPolling() async throws {
         let client = AgentClient(session: stubSession())
+        let postCount = LockedCounter()
+        let eventCount = LockedCounter()
+        let pollCount = LockedCounter()
+        StubURLProtocol.set { request in
+            switch (request.httpMethod, request.url?.path) {
+            case ("POST", "/v1/conversations/conv-1/turns"):
+                postCount.increment()
+                return (202, Data(#"{"turn_id":"turn-1","conversation_id":"conv-1","message_id":"message-stable","thread_id":"thread-turn-1","question":"继续分析","period_days":7,"status":"accepted","created_at":"2026-11-05T01:00:00Z","updated_at":"2026-11-05T01:00:00Z"}"#.utf8))
+            case ("GET", "/v1/conversations/conv-1/turns/turn-1/events"):
+                eventCount.increment()
+                XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "text/event-stream")
+                let body = """
+                event: turn
+                data: {"turn_id":"turn-1","conversation_id":"conv-1","message_id":"message-stable","thread_id":"thread-turn-1","question":"继续分析","period_days":7,"status":"running","created_at":"2026-11-05T01:00:00Z","updated_at":"2026-11-05T01:00:00Z"}
+
+                event: turn
+                data: {"turn_id":"turn-1","conversation_id":"conv-1","message_id":"message-stable","thread_id":"thread-turn-1","question":"继续分析","period_days":7,"status":"completed","run_id":"run-1","answer":"工作 60 分钟","memory_changes":[],"created_at":"2026-11-05T01:00:00Z","updated_at":"2026-11-05T01:00:01Z"}
+
+                """
+                return (200, Data(body.utf8))
+            case ("GET", "/v1/conversations/conv-1/turns/turn-1"):
+                pollCount.increment()
+                return (500, Data())
+            default:
+                XCTFail("unexpected request \(request.httpMethod ?? "") \(request.url?.absoluteString ?? "")")
+                return (500, Data())
+            }
+        }
+
+        let turn: ConversationTurn
+        do {
+            turn = try await client.sendMessage(conversationID: "conv-1", messageID: "message-stable", question: "继续分析", periodDays: 7, snapshot: snapshot())
+        } catch {
+            XCTFail("SSE failed with \(error); posts=\(postCount.value) events=\(eventCount.value) polls=\(pollCount.value)")
+            return
+        }
+
+        XCTAssertEqual(postCount.value, 1)
+        XCTAssertEqual(eventCount.value, 1)
+        XCTAssertEqual(pollCount.value, 0)
+        XCTAssertEqual(turn.status, .completed)
+        XCTAssertEqual(turn.answer, "工作 60 分钟")
+    }
+
+    func testConversationClientFallsBackToPollingWithoutResubmitting() async throws {
+        let client = AgentClient(session: stubSession())
+        let postCount = LockedCounter()
+        let eventCount = LockedCounter()
         let getCount = LockedCounter()
         StubURLProtocol.set { request in
             switch (request.httpMethod, request.url?.path) {
             case ("POST", "/v1/conversations/conv-1/turns"):
+                postCount.increment()
                 let object = try JSONSerialization.jsonObject(with: requestBodyData(request)) as! [String: Any]
                 XCTAssertEqual(object["schema_version"] as? Int, 1)
                 XCTAssertEqual(object["message_id"] as? String, "message-stable")
@@ -141,6 +190,9 @@ final class AgentClientTests: XCTestCase, @unchecked Sendable {
                 XCTAssertEqual(object["period_days"] as? Int, 7)
                 XCTAssertNotNil(object["snapshot"] as? [String: Any])
                 return (202, Data(#"{"turn_id":"turn-1","conversation_id":"conv-1","message_id":"message-stable","thread_id":"thread-turn-1","question":"继续分析","period_days":7,"status":"accepted","created_at":"2026-11-05T01:00:00Z","updated_at":"2026-11-05T01:00:00Z"}"#.utf8))
+            case ("GET", "/v1/conversations/conv-1/turns/turn-1/events"):
+                eventCount.increment()
+                return (404, Data(#"{"schema_version":1,"error":{"code":"not_found","message":"接口不存在。","retryable":false}}"#.utf8))
             case ("GET", "/v1/conversations/conv-1/turns/turn-1"):
                 getCount.increment()
                 return (200, Data(#"{"turn_id":"turn-1","conversation_id":"conv-1","message_id":"message-stable","thread_id":"thread-turn-1","question":"继续分析","period_days":7,"status":"completed","run_id":"run-1","answer":"工作 60 分钟","memory_changes":[],"created_at":"2026-11-05T01:00:00Z","updated_at":"2026-11-05T01:00:01Z"}"#.utf8))
@@ -152,6 +204,8 @@ final class AgentClientTests: XCTestCase, @unchecked Sendable {
 
         let turn = try await client.sendMessage(conversationID: "conv-1", messageID: "message-stable", question: "继续分析", periodDays: 7, snapshot: snapshot())
 
+        XCTAssertEqual(postCount.value, 1)
+        XCTAssertEqual(eventCount.value, 1)
         XCTAssertEqual(getCount.value, 1)
         XCTAssertEqual(turn.status, .completed)
         XCTAssertEqual(turn.answer, "工作 60 分钟")
@@ -287,7 +341,8 @@ private final class StubURLProtocol: URLProtocol, @unchecked Sendable {
         Self.lock.lock(); let handler = Self.handler; Self.lock.unlock()
         do {
             let (status, body) = try handler!(request)
-            let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+            let contentType = request.value(forHTTPHeaderField: "Accept") == "text/event-stream" ? "text/event-stream" : "application/json"
+            let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: nil, headerFields: ["Content-Type": contentType])!
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: body)
             client?.urlProtocolDidFinishLoading(self)

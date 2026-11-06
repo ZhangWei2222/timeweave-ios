@@ -290,27 +290,22 @@ struct AgentClient: AgentAnalyzing, AgentConversing {
         let turn = try await requestJSON(path: ["v1", "conversations", conversationID, "turns"], method: "POST", body: body, expectedStatus: [202], as: ConversationTurn.self)
         try validate(turn: turn)
         if turn.status.isTerminal { return turn }
-        return try await pollTurn(conversationID: conversationID, turnID: turn.id)
+        return try await waitForTurn(conversationID: conversationID, turnID: turn.id)
     }
 
     func resumeTurn(conversationID: String, turnID: String) async throws -> ConversationTurn {
-        try await pollTurn(conversationID: conversationID, turnID: turnID)
+        try await waitForTurn(conversationID: conversationID, turnID: turnID)
     }
 
-    private func pollTurn(conversationID: String, turnID: String) async throws -> ConversationTurn {
+    private func waitForTurn(conversationID: String, turnID: String) async throws -> ConversationTurn {
         try await withThrowingTaskGroup(of: ConversationTurn.self) { group in
             group.addTask {
-                var attempt = 0
-                while true {
-                    if attempt > 0 {
-                        let milliseconds = min(2_000, 200 * (1 << min(attempt - 1, 3)))
-                        try await Task.sleep(nanoseconds: UInt64(milliseconds) * 1_000_000)
-                    }
-                    try Task.checkCancellation()
-                    let turn = try await getJSON(path: ["v1", "conversations", conversationID, "turns", turnID], as: ConversationTurn.self)
-                    try validate(turn: turn)
-                    if turn.status.isTerminal { return turn }
-                    attempt += 1
+                do {
+                    return try await streamTurn(conversationID: conversationID, turnID: turnID)
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    return try await pollTurn(conversationID: conversationID, turnID: turnID)
                 }
             }
             group.addTask {
@@ -320,6 +315,78 @@ struct AgentClient: AgentAnalyzing, AgentConversing {
             defer { group.cancelAll() }
             guard let result = try await group.next() else { throw AgentClientError.invalidResponse }
             return result
+        }
+    }
+
+    private func streamTurn(conversationID: String, turnID: String) async throws -> ConversationTurn {
+        var request = URLRequest(url: endpoint(["v1", "conversations", conversationID, "turns", turnID, "events"]))
+        request.httpMethod = "GET"
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        request.setValue("no-cache", forHTTPHeaderField: "Cache-Control")
+        if let accessToken { request.setValue("Bearer " + accessToken, forHTTPHeaderField: "Authorization") }
+        request.timeoutInterval = 35
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+
+        let bytes: URLSession.AsyncBytes
+        let response: URLResponse
+        do {
+            (bytes, response) = try await session.bytes(for: request, delegate: RejectAnalysisRedirects())
+        } catch let error as URLError {
+            if error.code == .cancelled { throw CancellationError() }
+            throw AgentClientError.transport(error.code)
+        }
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+              http.value(forHTTPHeaderField: "Content-Type")?.lowercased().hasPrefix("text/event-stream") == true else {
+            throw AgentClientError.invalidResponse
+        }
+
+        var decoder = TurnEventStreamDecoder()
+        var lineBytes: [UInt8] = []
+        for try await byte in bytes {
+            try Task.checkCancellation()
+            if byte == 0x0A {
+                if lineBytes.last == 0x0D { lineBytes.removeLast() }
+                let line = String(decoding: lineBytes, as: UTF8.self)
+                lineBytes.removeAll(keepingCapacity: true)
+                if let turn = try decoder.consume(line: line) {
+                    try validate(turn: turn)
+                    if turn.status.isTerminal { return turn }
+                }
+            } else {
+                lineBytes.append(byte)
+                if lineBytes.count > 4 * 1024 * 1024 {
+                    throw AgentClientError.invalidResponse
+                }
+            }
+        }
+        if !lineBytes.isEmpty {
+            if lineBytes.last == 0x0D { lineBytes.removeLast() }
+            if let turn = try decoder.consume(line: String(decoding: lineBytes, as: UTF8.self)) {
+                try validate(turn: turn)
+                if turn.status.isTerminal { return turn }
+            }
+        }
+        if let turn = try decoder.finish() {
+            try validate(turn: turn)
+            if turn.status.isTerminal {
+                return turn
+            }
+        }
+        throw AgentClientError.invalidResponse
+    }
+
+    private func pollTurn(conversationID: String, turnID: String) async throws -> ConversationTurn {
+        var attempt = 0
+        while true {
+            if attempt > 0 {
+                let milliseconds = min(2_000, 200 * (1 << min(attempt - 1, 3)))
+                try await Task.sleep(nanoseconds: UInt64(milliseconds) * 1_000_000)
+            }
+            try Task.checkCancellation()
+            let turn = try await getJSON(path: ["v1", "conversations", conversationID, "turns", turnID], as: ConversationTurn.self)
+            try validate(turn: turn)
+            if turn.status.isTerminal { return turn }
+            attempt += 1
         }
     }
 
@@ -427,6 +494,52 @@ struct AgentClient: AgentAnalyzing, AgentConversing {
         guard let failure = try? JSONDecoder().decode(Failure.self, from: data), failure.schemaVersion == 1,
               !failure.error.message.isEmpty else { return .invalidResponse }
         return .server(code: failure.error.code, message: failure.error.message, retryable: failure.error.retryable, runID: failure.runID)
+    }
+}
+
+private struct TurnEventStreamDecoder {
+    private var event: String?
+    private var dataLines: [String] = []
+
+    mutating func consume(line: String) throws -> ConversationTurn? {
+        if line.isEmpty {
+            return try dispatch()
+        }
+        if line.hasPrefix(":") { return nil }
+        let field: Substring
+        let value: Substring
+        if let separator = line.firstIndex(of: ":") {
+            field = line[..<separator]
+            let start = line.index(after: separator)
+            value = line[start...].drop(while: { $0 == " " })
+        } else {
+            field = Substring(line)
+            value = ""
+        }
+        switch field {
+        case "event": event = String(value)
+        case "data": dataLines.append(String(value))
+        default: break
+        }
+        return nil
+    }
+
+    mutating func finish() throws -> ConversationTurn? {
+        try dispatch()
+    }
+
+    private mutating func dispatch() throws -> ConversationTurn? {
+        defer {
+            event = nil
+            dataLines.removeAll(keepingCapacity: true)
+        }
+        guard event == nil || event == "turn" else { return nil }
+        guard !dataLines.isEmpty else { return nil }
+        let data = Data(dataLines.joined(separator: "\n").utf8)
+        guard let turn = try? JSONDecoder().decode(ConversationTurn.self, from: data) else {
+            throw AgentClientError.invalidResponse
+        }
+        return turn
     }
 }
 
