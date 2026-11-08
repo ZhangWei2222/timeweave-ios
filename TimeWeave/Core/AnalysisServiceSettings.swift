@@ -181,6 +181,35 @@ final class AnalysisServiceSettings: ObservableObject {
         try removeToken(environment: .remote)
     }
 
+    func pairRemote(qrPayload: String, address: String, session: URLSession = AgentClient.analysisSession) async throws {
+        let endpoint = try AnalysisEndpoint(address: address, environment: .remote)
+        let prefix = "timeweave-pair="
+        guard var payload = URLComponents(string: qrPayload), let fragment = payload.fragment,
+              fragment.hasPrefix(prefix) else {
+            throw AgentClientError.configuration("请扫描 TimeWeave 的设备配对二维码。")
+        }
+        let code = String(fragment.dropFirst(prefix.count))
+        guard code.utf8.count == 43, code.utf8.allSatisfy({
+            (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 45 || $0 == 95
+        }) else {
+            throw AgentClientError.configuration("配对码格式无效，请重新生成二维码。")
+        }
+        payload.fragment = nil
+        guard let addressInCode = payload.string,
+              let qrEndpoint = try? AnalysisEndpoint(address: addressInCode, environment: .remote),
+              qrEndpoint.origin == endpoint.origin else {
+            throw AgentClientError.configuration("二维码与当前远端地址不匹配。")
+        }
+        let expectedRevision = revision
+        let client = AgentClient(session: session, baseURL: endpoint.url)
+        let token = try await client.redeemDevicePairing(code: code)
+        try Task.checkCancellation()
+        guard revision == expectedRevision else {
+            throw AgentClientError.configuration("服务设置已变化，请重新生成配对二维码。")
+        }
+        try save(environment: .remote, localAddress: localAddress, remoteAddress: endpoint.origin, token: token)
+    }
+
     func removeToken(environment: AnalysisEnvironment) throws {
         let address = environment == .local ? localAddress : remoteAddress
         try tokens.delete(origin: AnalysisEndpoint(address: address, environment: environment).origin)

@@ -1,4 +1,6 @@
+import AVFoundation
 import SwiftUI
+import VisionKit
 
 @MainActor
 struct AIAnalysisView: View {
@@ -297,6 +299,8 @@ private struct AnalysisServiceSettingsView: View {
     @State private var error: String?
     @State private var notice: String?
     @State private var confirmingDelete = false
+    @State private var showingPairingScanner = false
+    @State private var pairingInProgress = false
 
     init(service: AnalysisServiceSettings, didChange: @escaping () -> Void) {
         self.service = service
@@ -331,6 +335,9 @@ private struct AnalysisServiceSettingsView: View {
                     Section {
                         addressField("HTTPS 远端地址", text: $draft.remoteAddress)
                             .accessibilityIdentifier("remoteServiceAddress")
+                        Button(action: openPairingScanner) {
+                            Label("扫码配对", systemImage: "qrcode.viewfinder")
+                        }.accessibilityIdentifier("scanRemotePairingCode")
                         SecureField("访问令牌（留空保留原令牌）", text: $draft.token)
                             .textInputAutocapitalization(.never).autocorrectionDisabled()
                             .privacySensitive().accessibilityIdentifier("remoteAccessToken")
@@ -338,18 +345,21 @@ private struct AnalysisServiceSettingsView: View {
                             Button("删除已保存的远端令牌", role: .destructive) { confirmingDelete = true }
                         }
                     } header: { Text("远端服务") } footer: {
-                        Text("只填 HTTPS 主机地址及可选端口，不加接口路径。这里使用 Agent 服务访问令牌，不是阿里云 AK 或百炼密钥；令牌仅保存在设备钥匙串，换地址需重新填写。远端服务必须配置访问令牌和 HTTPS。")
+                        Text("扫描此服务生成的一次性二维码。配对后凭证会保存在设备钥匙串，以后可以直接使用。旧版服务仍可手动填写访问令牌。")
                     }
                 }
+                if pairingInProgress { ProgressView("正在配对…") }
                 if let error { Section { Text(error).foregroundStyle(.red).accessibilityIdentifier("serviceSettingsError") } }
                 if let notice { Section { Text(notice).foregroundStyle(.secondary) } }
             }
+            .disabled(pairingInProgress)
             .navigationTitle("分析服务设置")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() }.disabled(pairingInProgress) }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("保存", action: save).accessibilityIdentifier("saveAnalysisService")
+                        .disabled(pairingInProgress)
                 }
             }
             .confirmationDialog("删除 \(draft.environment == .local ? service.localAddress : service.remoteAddress) 的访问令牌？", isPresented: $confirmingDelete, titleVisibility: .visible) {
@@ -361,6 +371,22 @@ private struct AnalysisServiceSettingsView: View {
                         error = nil
                         notice = "令牌已立即删除。再次使用该远端地址时需要重新填写。"
                     } catch { self.error = error.localizedDescription }
+                }
+            }
+        }
+        .interactiveDismissDisabled(pairingInProgress)
+        .sheet(isPresented: $showingPairingScanner) {
+            NavigationStack {
+                PairingCodeScanner(onCode: acceptPairingCode) {
+                    showingPairingScanner = false
+                    error = "无法打开摄像头，请检查相机权限后重试。"
+                }
+                .navigationTitle("扫描设备配对码")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("取消") { showingPairingScanner = false }
+                    }
                 }
             }
         }
@@ -378,5 +404,99 @@ private struct AnalysisServiceSettingsView: View {
             draft.token = ""
             dismiss()
         } catch { self.error = error.localizedDescription }
+    }
+
+    private func openPairingScanner() {
+        guard DataScannerViewController.isSupported else {
+            error = "这台设备不支持扫码配对，请在支持相机扫码的 iPhone 上操作。"
+            return
+        }
+        pairingInProgress = true
+        error = nil
+        Task {
+            defer { pairingInProgress = false }
+            guard await AVCaptureDevice.requestAccess(for: .video), DataScannerViewController.isAvailable else {
+                error = "请在系统设置中允许时序使用相机，再尝试扫码。"
+                return
+            }
+            showingPairingScanner = true
+        }
+    }
+
+    private func acceptPairingCode(_ payload: String) {
+        guard !pairingInProgress else { return }
+        showingPairingScanner = false
+        pairingInProgress = true
+        let address = draft.remoteAddress
+        Task {
+            defer { pairingInProgress = false }
+            do {
+                try await service.pairRemote(qrPayload: payload, address: address)
+                didChange()
+                draft.token = ""
+                dismiss()
+            } catch {
+                self.error = error.localizedDescription
+            }
+        }
+    }
+}
+
+@MainActor
+private struct PairingCodeScanner: UIViewControllerRepresentable {
+    let onCode: (String) -> Void
+    let onUnavailable: () -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(onCode: onCode, onUnavailable: onUnavailable) }
+
+    func makeUIViewController(context: Context) -> DataScannerViewController {
+        let scanner = DataScannerViewController(recognizedDataTypes: [.barcode(symbologies: [.qr])])
+        let coordinator = context.coordinator
+        scanner.delegate = coordinator
+        Task { @MainActor [weak scanner] in
+            guard let scanner, scanner.delegate != nil else { return }
+            do { try scanner.startScanning() }
+            catch { coordinator.fail() }
+        }
+        return scanner
+    }
+
+    func updateUIViewController(_ scanner: DataScannerViewController, context: Context) {}
+
+    static func dismantleUIViewController(_ scanner: DataScannerViewController, coordinator: Coordinator) {
+        scanner.delegate = nil
+        scanner.stopScanning()
+    }
+
+    final class Coordinator: NSObject, DataScannerViewControllerDelegate {
+        let onCode: (String) -> Void
+        let onUnavailable: () -> Void
+        private var finished = false
+
+        init(onCode: @escaping (String) -> Void, onUnavailable: @escaping () -> Void) {
+            self.onCode = onCode
+            self.onUnavailable = onUnavailable
+        }
+
+        func dataScanner(_ scanner: DataScannerViewController, didAdd addedItems: [RecognizedItem], allItems: [RecognizedItem]) {
+            guard !finished else { return }
+            for item in addedItems {
+                guard case .barcode(let barcode) = item, let payload = barcode.payloadStringValue else { continue }
+                finished = true
+                scanner.stopScanning()
+                onCode(payload)
+                return
+            }
+        }
+
+        func dataScanner(_ scanner: DataScannerViewController, becameUnavailableWithError error: DataScannerViewController.ScanningUnavailable) {
+            fail()
+        }
+
+        func fail() {
+            guard !finished else { return }
+            finished = true
+            onUnavailable()
+        }
     }
 }

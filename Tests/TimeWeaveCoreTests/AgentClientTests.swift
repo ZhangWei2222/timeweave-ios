@@ -54,6 +54,81 @@ final class AgentClientTests: XCTestCase, @unchecked Sendable {
         }
     }
 
+    @MainActor
+    func testPairingSendsOnlyTheCodeAndReusesTheCredentialAfterReload() async throws {
+        let name = "TimeWeave.PairingTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        let vault = MemoryAnalysisTokens()
+        let settings = AnalysisServiceSettings(defaults: defaults, tokens: vault)
+        let code = String(repeating: "a", count: 43)
+        let token = String(repeating: "B", count: 43)
+        let session = client { request in
+            XCTAssertEqual(request.url?.absoluteString, "https://api.example.com/v1/device-pairings/redeem")
+            XCTAssertEqual(request.httpMethod, "POST")
+            XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
+            XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+            let payload = try XCTUnwrap(try JSONSerialization.jsonObject(with: requestBodyData(request)) as? [String: Any])
+            XCTAssertEqual(Set(payload.keys), ["schema_version", "code"])
+            XCTAssertEqual(payload["schema_version"] as? Int, 1)
+            XCTAssertEqual(payload["code"] as? String, code)
+            return (200, Data("{\"schema_version\":1,\"access_token\":\"\(token)\"}".utf8))
+        }.session
+
+        try await settings.pairRemote(qrPayload: "https://API.example.com:443/#timeweave-pair=\(code)", address: "https://api.example.com", session: session)
+
+        let reloaded = AnalysisServiceSettings(defaults: defaults, tokens: vault)
+        XCTAssertEqual(reloaded.environment, .remote)
+        XCTAssertEqual(try reloaded.makeClient().baseURL.absoluteString, "https://api.example.com")
+        XCTAssertEqual(try reloaded.makeClient().accessToken, token)
+        let preferences = try XCTUnwrap(defaults.data(forKey: "analysis.service.v1"))
+        XCTAssertFalse(String(decoding: preferences, as: UTF8.self).contains(token))
+    }
+
+    @MainActor
+    func testInvalidPairingOriginOrCodeDoesNotSendARequest() async throws {
+        let settings = AnalysisServiceSettings(tokens: MemoryAnalysisTokens())
+        let code = String(repeating: "a", count: 43)
+        let session = client { _ in
+            XCTFail("Untrusted QR data must not reach the network")
+            return (500, Data())
+        }.session
+        for qr in ["https://other.example.com/#timeweave-pair=\(code)",
+                   "https://api.example.com/path#timeweave-pair=\(code)",
+                   "https://api.example.com/#timeweave-pair=short"] {
+            do {
+                try await settings.pairRemote(qrPayload: qr, address: "https://api.example.com", session: session)
+                XCTFail("Accepted invalid pairing QR")
+            } catch let error as AgentClientError {
+                guard case .configuration = error else { return XCTFail("Unexpected error: \(error)") }
+            }
+        }
+    }
+
+    @MainActor
+    func testRejectedPairingPreservesTheExistingRemoteCredential() async throws {
+        let name = "TimeWeave.PairingTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: name)!
+        defer { defaults.removePersistentDomain(forName: name) }
+        let settings = AnalysisServiceSettings(defaults: defaults, tokens: MemoryAnalysisTokens())
+        let token = String(repeating: "B", count: 43)
+        let code = String(repeating: "a", count: 43)
+        try settings.save(environment: .remote, localAddress: settings.localAddress, remoteAddress: "https://api.example.com", token: token)
+        let revision = settings.revision
+        let session = client { _ in
+            (400, Data(#"{"schema_version":1,"error":{"code":"invalid_pairing","message":"配对码无效或已过期。","retryable":false}}"#.utf8))
+        }.session
+
+        do {
+            try await settings.pairRemote(qrPayload: "https://api.example.com/#timeweave-pair=\(code)", address: "https://api.example.com", session: session)
+            XCTFail("Accepted a rejected pairing")
+        } catch let error as AgentClientError {
+            XCTAssertEqual(error, .server(code: "invalid_pairing", message: "配对码无效或已过期。", retryable: false, runID: nil))
+        }
+        XCTAssertEqual(settings.revision, revision)
+        XCTAssertEqual(try settings.makeClient().accessToken, token)
+    }
+
     func testServerErrorPreservesRunIDAndRetryPolicy() async throws {
         let client = client { _ in (400, Data(#"{"schema_version":1,"run_id":"run-bad","error":{"code":"invalid_request","message":"快照无效","retryable":false}}"#.utf8)) }
         do { _ = try await client.analyze(question: "分析", snapshot: snapshot()); XCTFail("accepted 400") }

@@ -255,6 +255,21 @@ struct AgentClient: AgentAnalyzing, AgentConversing {
         try await getJSON(path: ["v1", "capabilities"], as: AgentCapabilities.self)
     }
 
+    func redeemDevicePairing(code: String) async throws -> String {
+        struct Request: Encodable {
+            let schema_version = 1
+            let code: String
+        }
+        struct Result: Decodable {
+            let schema_version: Int
+            let access_token: String
+        }
+        let result = try await requestJSON(path: ["v1", "device-pairings", "redeem"], method: "POST",
+                                           body: JSONEncoder().encode(Request(code: code)), expectedStatus: [200], as: Result.self)
+        guard result.schema_version == 1 else { throw AgentClientError.invalidResponse }
+        return result.access_token
+    }
+
     func listConversations() async throws -> [ConversationSummary] {
         struct Result: Decodable { let schemaVersion: Int; let conversations: [ConversationSummary]; enum CodingKeys: String, CodingKey { case schemaVersion = "schema_version", conversations } }
         let result = try await getJSON(path: ["v1", "conversations"], as: Result.self)
