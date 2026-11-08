@@ -189,9 +189,11 @@ final class AnalysisServiceSettings: ObservableObject {
             throw AgentClientError.configuration("请扫描 TimeWeave 的设备配对二维码。")
         }
         let code = String(fragment.dropFirst(prefix.count))
-        guard code.utf8.count == 43, code.utf8.allSatisfy({
-            (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 45 || $0 == 95
-        }) else {
+        let standardBase64 = code.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/") + "="
+        guard code.utf8.count == 43,
+              let decoded = Data(base64Encoded: standardBase64), decoded.count == 32,
+              decoded.base64EncodedString().replacingOccurrences(of: "+", with: "-")
+                .replacingOccurrences(of: "/", with: "_").dropLast() == code else {
             throw AgentClientError.configuration("配对码格式无效，请重新生成二维码。")
         }
         payload.fragment = nil

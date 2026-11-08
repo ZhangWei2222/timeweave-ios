@@ -61,8 +61,8 @@ final class AgentClientTests: XCTestCase, @unchecked Sendable {
         defer { defaults.removePersistentDomain(forName: name) }
         let vault = MemoryAnalysisTokens()
         let settings = AnalysisServiceSettings(defaults: defaults, tokens: vault)
-        let code = String(repeating: "a", count: 43)
-        let token = String(repeating: "B", count: 43)
+        let code = String(repeating: "A", count: 43)
+        let token = String(repeating: "B", count: 42) + "A"
         let session = client { request in
             XCTAssertEqual(request.url?.absoluteString, "https://api.example.com/v1/device-pairings/redeem")
             XCTAssertEqual(request.httpMethod, "POST")
@@ -88,14 +88,15 @@ final class AgentClientTests: XCTestCase, @unchecked Sendable {
     @MainActor
     func testInvalidPairingOriginOrCodeDoesNotSendARequest() async throws {
         let settings = AnalysisServiceSettings(tokens: MemoryAnalysisTokens())
-        let code = String(repeating: "a", count: 43)
+        let code = String(repeating: "A", count: 43)
         let session = client { _ in
             XCTFail("Untrusted QR data must not reach the network")
             return (500, Data())
         }.session
         for qr in ["https://other.example.com/#timeweave-pair=\(code)",
                    "https://api.example.com/path#timeweave-pair=\(code)",
-                   "https://api.example.com/#timeweave-pair=short"] {
+                   "https://api.example.com/#timeweave-pair=short",
+                   "https://api.example.com/#timeweave-pair=\(String(repeating: "a", count: 43))"] {
             do {
                 try await settings.pairRemote(qrPayload: qr, address: "https://api.example.com", session: session)
                 XCTFail("Accepted invalid pairing QR")
@@ -111,8 +112,8 @@ final class AgentClientTests: XCTestCase, @unchecked Sendable {
         let defaults = UserDefaults(suiteName: name)!
         defer { defaults.removePersistentDomain(forName: name) }
         let settings = AnalysisServiceSettings(defaults: defaults, tokens: MemoryAnalysisTokens())
-        let token = String(repeating: "B", count: 43)
-        let code = String(repeating: "a", count: 43)
+        let token = String(repeating: "B", count: 42) + "A"
+        let code = String(repeating: "A", count: 43)
         try settings.save(environment: .remote, localAddress: settings.localAddress, remoteAddress: "https://api.example.com", token: token)
         let revision = settings.revision
         let session = client { _ in

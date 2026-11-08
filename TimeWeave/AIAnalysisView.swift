@@ -378,6 +378,7 @@ private struct AnalysisServiceSettingsView: View {
         .sheet(isPresented: $showingPairingScanner) {
             NavigationStack {
                 PairingCodeScanner(onCode: acceptPairingCode) {
+                    guard showingPairingScanner else { return }
                     showingPairingScanner = false
                     error = "无法打开摄像头，请检查相机权限后重试。"
                 }
@@ -424,7 +425,7 @@ private struct AnalysisServiceSettingsView: View {
     }
 
     private func acceptPairingCode(_ payload: String) {
-        guard !pairingInProgress else { return }
+        guard showingPairingScanner, !pairingInProgress else { return }
         showingPairingScanner = false
         pairingInProgress = true
         let address = draft.remoteAddress
