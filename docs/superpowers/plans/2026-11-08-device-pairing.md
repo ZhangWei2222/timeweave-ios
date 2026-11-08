@@ -24,8 +24,9 @@
 
 ## Server and QR issuer
 
-- [ ] Fetch the private backend's latest `origin/main` and create an independent development branch.
-- [ ] Test that unauthenticated callers and paired devices cannot issue codes, that a code expires within five minutes and redeems at most once even under concurrent requests, and that device credentials work after a server restart and cease working after revocation.
-- [ ] Add admin-only code issuance and device revocation. Store hashes, never plaintext device tokens. Enable pairing only for an authenticated deployment with durable state. Preserve the current service token and API behavior.
-- [ ] Add a Mac-side QR issuer that uses the admin credential on ECS and renders the returned one-time code locally, without putting a long-lived credential in the QR.
-- [ ] Run Go tests and verify end-to-end against a staged service before deploying either change.
+- [x] Fetch the private backend's latest `origin/main` and create an independent development branch.
+- [x] Test that unauthenticated callers and paired devices cannot issue codes, that a code expires within five minutes and redeems at most once even under concurrent requests, and that device credentials work after a server restart and cease working after revocation.
+- [x] Add admin-only code issuance and device revocation. Store hashes, never plaintext device tokens. Enable pairing only for an authenticated deployment with durable state. Preserve the current service token and API behavior.
+- [x] Add a Mac-side QR issuer that uses the admin credential on ECS and displays the PNG returned by the service, without putting a long-lived credential in the QR.
+- [x] Run Go tests and verify issuance, PNG, redemption, replay rejection, analysis-only capabilities, and revocation against a loopback service.
+- [ ] Verify the upgraded service over HTTPS and the physical iPhone camera flow before declaring the rollout complete.
