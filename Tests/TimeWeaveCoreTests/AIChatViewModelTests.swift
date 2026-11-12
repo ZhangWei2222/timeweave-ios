@@ -31,10 +31,9 @@ final class AIChatViewModelTests: XCTestCase {
             #"{"id":"m1","turn_id":"turn-1","role":"user","text":"分析","created_at":"2026-11-05T01:00:00Z"}"#,
             #"{"id":"m2","turn_id":"turn-1","role":"assistant","text":"工作 60 分钟","created_at":"2026-11-05T01:00:01Z"}"#
         ])
-        let completed = try turn(status: "completed", answer: "工作 60 分钟", runID: "run-1")
         let client = ChatClientStub(conversations: [base], sendResults: [
             .failure(AgentClientError.transport(.cannotConnectToHost)),
-            .success(completed)
+            .success(receipt())
         ], refreshedConversation: completedConversation)
         var snapshots = 0
         let model = AIChatViewModel(clientProvider: { client }, serviceScope: { "local" }, defaults: defaults) {
@@ -45,9 +44,9 @@ final class AIChatViewModelTests: XCTestCase {
         model.draft = "分析"
 
         model.submit()
-        await waitUntil { !model.isLoading && model.error != nil }
+        await waitUntil { !model.isSubmitting && model.error != nil }
         model.retry()
-        await waitUntil { !model.isLoading && model.messages.count == 2 }
+        await waitUntil { !model.isSubmitting && model.messages.count == 2 }
 
         let ids = await client.submittedMessageIDs()
         XCTAssertEqual(ids.count, 2)
@@ -63,7 +62,7 @@ final class AIChatViewModelTests: XCTestCase {
             #"{"id":"remote-answer","turn_id":"remote-turn","role":"assistant","text":"远端新答案","created_at":"2026-11-05T01:00:01Z"}"#
         ])
         let delayed = DelayedChatClient(conversation: localConversation)
-        let remote = ChatClientStub(conversations: [remoteConversation], sendResults: [.success(try turn(status: "completed", answer: "远端新答案", runID: "remote-run"))], refreshedConversation: remoteConversation)
+        let remote = ChatClientStub(conversations: [remoteConversation], sendResults: [.success(receipt())], refreshedConversation: remoteConversation)
         let selection = ChatSelection(client: delayed, scope: "local")
         let model = AIChatViewModel(clientProvider: { selection.client }, serviceScope: { selection.scope }, defaults: defaults) { try self.snapshot() }
         await model.load()
@@ -77,8 +76,8 @@ final class AIChatViewModelTests: XCTestCase {
         await waitUntil { model.currentConversation?.id == "remote-conv" }
         model.draft = "新问题"
         model.submit()
-        await waitUntil { !model.isLoading && model.messages.last?.text == "远端新答案" }
-        await delayed.finish(with: try turn(status: "completed", answer: "本地旧答案", runID: "local-run"))
+        await waitUntil { !model.isSubmitting && model.messages.last?.text == "远端新答案" }
+        await delayed.finish(with: receipt())
         await settle()
 
         XCTAssertEqual(model.currentConversation?.id, "remote-conv")
@@ -98,34 +97,87 @@ final class AIChatViewModelTests: XCTestCase {
         await client.waitForSubmission()
 
         await model.selectConversation(id: second.id)
-        await client.finish(with: try turn(status: "completed", answer: "A 的旧答案", runID: "run-a"))
+        await client.finish(with: receipt())
         await settle()
 
         XCTAssertEqual(model.currentConversation?.id, second.id)
         XCTAssertEqual(model.messages.last?.text, "B 的内容")
     }
 
-    func testOldServerFallsBackToLegacyAnalysis() async throws {
-        let client = ChatClientStub(capabilitiesError: AgentClientError.server(code: "not_found", message: "接口不存在", retryable: false, runID: nil), legacyAnswer: "旧接口答案")
-        let model = AIChatViewModel(clientProvider: { client }, serviceScope: { "old" }, defaults: isolatedDefaults()) { try self.snapshot() }
-
+    func testNewDraftSurvivesDelayedReceipt() async throws {
+        let client = DelayedChatClient(conversation: try conversation(id: "conv-1", title: "分析"))
+        let model = AIChatViewModel(clientProvider: { client }, serviceScope: { "local" }, defaults: isolatedDefaults()) { try self.snapshot() }
         await model.load()
-        XCTAssertEqual(model.mode, .legacy)
-        model.draft = "分析"
+        model.draft = "B"
         model.submit()
-        await waitUntil { !model.isLoading && model.messages.count == 2 }
+        await client.waitForSubmission()
 
-        XCTAssertEqual(model.messages.last?.text, "旧接口答案")
+        model.draft = "C"
+        await client.finish(with: receipt())
+        await waitUntil { !model.isSubmitting }
+
+        XCTAssertEqual(model.draft, "C")
+        XCTAssertTrue(model.canSubmit)
     }
 
-    func testCapabilitiesWithoutConversationsFallsBackToLegacy() async throws {
-        let client = ChatClientStub(capabilities: AgentCapabilities(schemaVersion: 1, conversations: false, memories: false), legacyAnswer: "兼容答案")
-        let model = AIChatViewModel(clientProvider: { client }, serviceScope: { "legacy-capabilities" }, defaults: isolatedDefaults()) { try self.snapshot() }
+    func testQueuedTurnsStaySendableAndHandoffAfterSteering() async throws {
+        let a = try turn(status: "running", id: "a")
+        let b = try turn(status: "queued", id: "b")
+        let c = try turn(status: "queued", id: "c")
+        let steeredB = try turn(status: "steered", id: "b", targetTurnID: "a")
+        let completedA = try turn(status: "completed", answer: "A 和 B 的答案", runID: "run-a", id: "a")
+        let runningC = try turn(status: "running", id: "c")
+        let completedC = try turn(status: "completed", answer: "C 的答案", runID: "run-c", id: "c")
+        let initial = try conversation(id: "conv-1", title: "分析", turns: [a], activeTurnID: "a")
+        let client = ChatClientStub(conversations: [initial], sendResults: [
+            .success(receipt(turnID: "b", disposition: .queued, revision: 2)),
+            .success(receipt(turnID: "c", disposition: .queued, revision: 3))
+        ])
+        let model = AIChatViewModel(clientProvider: { client }, serviceScope: { "local" }, defaults: isolatedDefaults()) { try self.snapshot() }
 
         await model.load()
+        XCTAssertTrue(model.isObserving)
+        model.draft = "B"
+        XCTAssertTrue(model.canSubmit)
+        await client.holdNextRefresh()
+        model.submit()
+        await waitUntil { !model.isSubmitting }
+        await client.waitForHeldRefresh()
 
-        XCTAssertEqual(model.mode, .legacy)
-        XCTAssertNil(model.error)
+        await client.setRefreshedConversation(try conversation(id: "conv-1", title: "分析", turns: [a, b, c], activeTurnID: "a", revision: 3))
+        model.draft = "C"
+        model.submit()
+        await waitUntil { model.queuedTurns.map(\.id) == ["b", "c"] }
+
+        await client.setRefreshedConversation(try conversation(id: "conv-1", title: "分析", turns: [a, steeredB, c], activeTurnID: "a", revision: 4))
+        await model.steer(b)
+        let steeredTarget = await client.steeredTarget
+        XCTAssertEqual(steeredTarget, "a")
+        XCTAssertEqual(model.queuedTurns.map(\.id), ["c"])
+        XCTAssertEqual(model.currentConversation?.turns[1].targetTurnID, "a")
+
+        await client.releaseRefresh(with: try conversation(id: "conv-1", title: "分析", turns: [a, b], activeTurnID: "a", revision: 2))
+        await settle()
+        XCTAssertEqual(model.currentConversation?.revision, 4)
+        XCTAssertEqual(model.queuedTurns.map(\.id), ["c"])
+
+        model.draft = "D"
+        await client.setRefreshedConversation(try conversation(id: "conv-1", title: "分析", turns: [completedA, steeredB, c], revision: 5))
+        await client.finishObservation(with: completedA)
+        await waitUntil { model.currentConversation?.revision == 5 }
+        XCTAssertTrue(model.isObserving)
+
+        await client.setRefreshedConversation(try conversation(id: "conv-1", title: "分析", turns: [completedA, steeredB, runningC], activeTurnID: "c", revision: 6))
+        await waitUntil { model.currentConversation?.activeTurnID == "c" }
+        await client.setRefreshedConversation(try conversation(id: "conv-1", title: "分析", turns: [completedA, steeredB, completedC], revision: 7))
+        await client.finishObservation(with: completedC)
+        await waitUntil { !model.isObserving }
+
+        let observedIDs = await client.resumedTurnIDs()
+        XCTAssertEqual(observedIDs, ["a", "c"])
+        XCTAssertEqual(model.currentConversation?.revision, 7)
+        XCTAssertTrue(model.queuedTurns.isEmpty)
+        XCTAssertEqual(model.draft, "D")
     }
 
     func testLoadResumesServerActiveTurnAfterViewModelRecreation() async throws {
@@ -140,7 +192,7 @@ final class AIChatViewModelTests: XCTestCase {
         let model = AIChatViewModel(clientProvider: { client }, serviceScope: { "local" }, defaults: isolatedDefaults()) { try self.snapshot() }
 
         await model.load()
-        await waitUntil { !model.isLoading && model.messages.last?.text == "恢复后的答案" }
+        await waitUntil { !model.isObserving && model.messages.last?.text == "恢复后的答案" }
 
         let resumedIDs = await client.resumedTurnIDs()
         XCTAssertEqual(resumedIDs, [running.id])
@@ -175,18 +227,19 @@ final class AIChatViewModelTests: XCTestCase {
         return defaults
     }
 
-    private func conversation(id: String, title: String, messages: [String] = [], turns: [ConversationTurn] = [], activeTurnID: String? = nil) throws -> Conversation {
+    private func conversation(id: String, title: String, messages: [String] = [], turns: [ConversationTurn] = [], activeTurnID: String? = nil, revision: UInt64 = 1) throws -> Conversation {
         let messageJSON = "[" + messages.joined(separator: ",") + "]"
         let turnData = try JSONEncoder().encode(turns)
         let turnJSON = String(decoding: turnData, as: UTF8.self)
         let activeJSON = activeTurnID.map { #", "active_turn_id":"\#($0)""# } ?? ""
-        return try JSONDecoder().decode(Conversation.self, from: Data(#"{"conversation_id":"\#(id)","principal_id":"local","title":"\#(title)","revision":1,"messages":\#(messageJSON),"turns":\#(turnJSON)\#(activeJSON),"created_at":"2026-11-05T01:00:00Z","updated_at":"2026-11-05T01:00:00Z"}"#.utf8))
+        return try JSONDecoder().decode(Conversation.self, from: Data(#"{"conversation_id":"\#(id)","principal_id":"local","title":"\#(title)","revision":\#(revision),"messages":\#(messageJSON),"turns":\#(turnJSON)\#(activeJSON),"created_at":"2026-11-05T01:00:00Z","updated_at":"2026-11-05T01:00:00Z"}"#.utf8))
     }
 
-    private func turn(status: String, answer: String?, runID: String?) throws -> ConversationTurn {
+    private func turn(status: String, answer: String? = nil, runID: String? = nil, id: String = "turn-1", targetTurnID: String? = nil) throws -> ConversationTurn {
         let answerJSON = answer.map { #", "answer":"\#($0)""# } ?? ""
         let runJSON = runID.map { #", "run_id":"\#($0)""# } ?? ""
-        let json = #"{"turn_id":"turn-1","conversation_id":"conv-1","message_id":"client-1","thread_id":"thread-1","question":"分析","period_days":7,"status":"\#(status)"\#(runJSON)\#(answerJSON),"memory_changes":[],"created_at":"2026-11-05T01:00:00Z","updated_at":"2026-11-05T01:00:01Z"}"#
+        let targetJSON = targetTurnID.map { #", "target_turn_id":"\#($0)""# } ?? ""
+        let json = #"{"turn_id":"\#(id)","conversation_id":"conv-1","message_id":"message-\#(id)","thread_id":"thread-1","question":"分析","period_days":7,"status":"\#(status)"\#(runJSON)\#(answerJSON)\#(targetJSON),"memory_changes":[],"created_at":"2026-11-05T01:00:00Z","updated_at":"2026-11-05T01:00:01Z"}"#
         return try JSONDecoder().decode(ConversationTurn.self, from: Data(json.utf8))
     }
 
@@ -195,9 +248,9 @@ final class AIChatViewModelTests: XCTestCase {
     }
 
     private func waitUntil(_ condition: @escaping @MainActor () -> Bool) async {
-        for _ in 0..<2_000 {
+        for _ in 0..<200 {
             if condition() { return }
-            await Task.yield()
+            try? await Task.sleep(for: .milliseconds(5))
         }
         XCTFail("condition was not reached")
     }
@@ -205,44 +258,47 @@ final class AIChatViewModelTests: XCTestCase {
     private func settle() async { for _ in 0..<50 { await Task.yield() } }
 }
 
-@MainActor
-private final class ChatSelection {
-    var client: any AIChatService
-    var scope: String
-    init(client: any AIChatService, scope: String) { self.client = client; self.scope = scope }
+private func receipt(turnID: String = "turn-1", disposition: ConversationInputReceipt.Disposition = .started, revision: UInt64 = 1) -> ConversationInputReceipt {
+    ConversationInputReceipt(schemaVersion: 1, messageID: "message-" + turnID, disposition: disposition, turnID: turnID, conversationRevision: revision)
 }
 
-private actor ChatClientStub: AIChatService {
+@MainActor
+private final class ChatSelection {
+    var client: any AgentConversing
+    var scope: String
+    init(client: any AgentConversing, scope: String) { self.client = client; self.scope = scope }
+}
+
+private actor ChatClientStub: AgentConversing {
     private let fixedCapabilities: AgentCapabilities
-    private let capabilitiesError: Error?
     private var conversations: [Conversation]
-    private var sendResults: [Result<ConversationTurn, Error>]
-    private let refreshedConversation: Conversation?
+    private var sendResults: [Result<ConversationInputReceipt, Error>]
+    private var refreshedConversation: Conversation?
     private var memories: [UserMemory]
     private let confirmedMemory: UserMemory?
-    private let legacyAnswer: String
     private var messageIDs: [String] = []
     private var requestedConversationID: String?
     private var resumeResults: [Result<ConversationTurn, Error>]
     private var resumedIDs: [String] = []
+    private var shouldHoldRefresh = false
+    private var heldRefresh: CheckedContinuation<Conversation, Never>?
+    private var observations: [String: CheckedContinuation<ConversationTurn, Never>] = [:]
+    private(set) var steeredTarget: String?
     private var submitted = false
 
-    init(conversations: [Conversation] = [], sendResults: [Result<ConversationTurn, Error>] = [], refreshedConversation: Conversation? = nil,
+    init(conversations: [Conversation] = [], sendResults: [Result<ConversationInputReceipt, Error>] = [], refreshedConversation: Conversation? = nil,
          resumeResults: [Result<ConversationTurn, Error>] = [], memories: [UserMemory] = [], confirmedMemory: UserMemory? = nil,
-         capabilities: AgentCapabilities = AgentCapabilities(schemaVersion: 1, conversations: true, memories: true), capabilitiesError: Error? = nil, legacyAnswer: String = "legacy") {
+         capabilities: AgentCapabilities = AgentCapabilities(schemaVersion: 1, conversations: true, memories: true)) {
         self.conversations = conversations
         self.sendResults = sendResults
         self.refreshedConversation = refreshedConversation
         self.memories = memories
         self.confirmedMemory = confirmedMemory
-        self.capabilitiesError = capabilitiesError
         self.fixedCapabilities = capabilities
         self.resumeResults = resumeResults
-        self.legacyAnswer = legacyAnswer
     }
 
     func capabilities() async throws -> AgentCapabilities {
-        if let capabilitiesError { throw capabilitiesError }
         return fixedCapabilities
     }
     func listConversations() async throws -> [ConversationSummary] {
@@ -250,18 +306,53 @@ private actor ChatClientStub: AIChatService {
     }
     func createConversation() async throws -> Conversation { conversations[0] }
     func getConversation(id: String) async throws -> Conversation {
+        if shouldHoldRefresh {
+            shouldHoldRefresh = false
+            return await withCheckedContinuation { heldRefresh = $0 }
+        }
         requestedConversationID = id
         if let refreshedConversation, id == refreshedConversation.id, submitted || !resumedIDs.isEmpty { return refreshedConversation }
         return conversations.first { $0.id == id }!
     }
     func deleteConversation(id: String, deleteMemories: Bool) async throws { conversations.removeAll { $0.id == id } }
-    func sendMessage(conversationID: String, messageID: String, question: String, periodDays: Int, snapshot: AnalysisSnapshot) async throws -> ConversationTurn {
+    func submitMessage(conversationID: String, messageID: String, question: String, periodDays: Int, snapshot: AnalysisSnapshot) async throws -> ConversationInputReceipt {
         messageIDs.append(messageID)
         submitted = true
         return try sendResults.removeFirst().get()
     }
-    func cancelTurn(conversationID: String, turnID: String) async throws -> ConversationTurn { try sendResults[0].get() }
-    func resumeTurn(conversationID: String, turnID: String) async throws -> ConversationTurn { resumedIDs.append(turnID); return try resumeResults.removeFirst().get() }
+    func steerQueuedTurn(conversationID: String, messageID: String, expectedTurnID: String) async throws -> ConversationInputReceipt {
+        steeredTarget = expectedTurnID
+        return receipt(turnID: "b", disposition: .steered, revision: 4)
+    }
+    func cancelTurn(conversationID: String, turnID: String) async throws -> ConversationTurn { fatalError() }
+    func observeTurn(conversationID: String, turnID: String) async throws -> ConversationTurn {
+        resumedIDs.append(turnID)
+        if !resumeResults.isEmpty { return try resumeResults.removeFirst().get() }
+        return await withCheckedContinuation { observations[turnID] = $0 }
+    }
+    func finishObservation(with turn: ConversationTurn) async {
+        for _ in 0..<200 {
+            if let continuation = observations.removeValue(forKey: turn.id) {
+                continuation.resume(returning: turn)
+                return
+            }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTFail("turn was not observed: \(turn.id)")
+    }
+    func holdNextRefresh() { shouldHoldRefresh = true }
+    func waitForHeldRefresh() async {
+        for _ in 0..<200 {
+            if heldRefresh != nil { return }
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        XCTFail("refresh was not held")
+    }
+    func releaseRefresh(with conversation: Conversation) {
+        heldRefresh?.resume(returning: conversation)
+        heldRefresh = nil
+    }
+    func setRefreshedConversation(_ conversation: Conversation) { refreshedConversation = conversation }
     func listMemories() async throws -> [UserMemory] { memories }
     func confirmMemory(id: String) async throws -> UserMemory {
         let value = confirmedMemory!
@@ -281,17 +372,14 @@ private actor ChatClientStub: AIChatService {
     func clearMemories() async throws { memories = [] }
     func memoryPreferences() async throws -> MemoryPreferences { MemoryPreferences(proactiveEnabled: true) }
     func setProactiveMemory(_ enabled: Bool) async throws -> MemoryPreferences { MemoryPreferences(proactiveEnabled: enabled) }
-    func analyze(question: String, snapshot: AnalysisSnapshot) async throws -> AnalysisResponse {
-        AnalysisResponse(schemaVersion: 1, runID: "legacy-run", answer: legacyAnswer)
-    }
     func submittedMessageIDs() -> [String] { messageIDs }
     func lastRequestedConversationID() -> String? { requestedConversationID }
     func resumedTurnIDs() -> [String] { resumedIDs }
 }
 
-private actor DelayedChatClient: AIChatService {
+private actor DelayedChatClient: AgentConversing {
     private let conversation: Conversation
-    private var continuation: CheckedContinuation<ConversationTurn, Error>?
+    private var continuation: CheckedContinuation<ConversationInputReceipt, Error>?
     private var submitted = false
     init(conversation: Conversation) { self.conversation = conversation }
     func capabilities() async throws -> AgentCapabilities { AgentCapabilities(schemaVersion: 1, conversations: true, memories: true) }
@@ -299,12 +387,13 @@ private actor DelayedChatClient: AIChatService {
     func createConversation() async throws -> Conversation { conversation }
     func getConversation(id: String) async throws -> Conversation { conversation }
     func deleteConversation(id: String, deleteMemories: Bool) async throws {}
-    func sendMessage(conversationID: String, messageID: String, question: String, periodDays: Int, snapshot: AnalysisSnapshot) async throws -> ConversationTurn {
+    func submitMessage(conversationID: String, messageID: String, question: String, periodDays: Int, snapshot: AnalysisSnapshot) async throws -> ConversationInputReceipt {
         submitted = true
         return try await withCheckedThrowingContinuation { continuation = $0 }
     }
+    func steerQueuedTurn(conversationID: String, messageID: String, expectedTurnID: String) async throws -> ConversationInputReceipt { fatalError() }
     func cancelTurn(conversationID: String, turnID: String) async throws -> ConversationTurn { fatalError() }
-    func resumeTurn(conversationID: String, turnID: String) async throws -> ConversationTurn { fatalError() }
+    func observeTurn(conversationID: String, turnID: String) async throws -> ConversationTurn { fatalError() }
     func listMemories() async throws -> [UserMemory] { [] }
     func confirmMemory(id: String) async throws -> UserMemory { fatalError() }
     func rejectMemory(id: String) async throws -> UserMemory { fatalError() }
@@ -313,14 +402,13 @@ private actor DelayedChatClient: AIChatService {
     func clearMemories() async throws {}
     func memoryPreferences() async throws -> MemoryPreferences { MemoryPreferences(proactiveEnabled: true) }
     func setProactiveMemory(_ enabled: Bool) async throws -> MemoryPreferences { MemoryPreferences(proactiveEnabled: enabled) }
-    func analyze(question: String, snapshot: AnalysisSnapshot) async throws -> AnalysisResponse { fatalError() }
     func waitForSubmission() async { for _ in 0..<1_000 { if submitted { return }; await Task.yield() } }
-    func finish(with turn: ConversationTurn) { continuation?.resume(returning: turn); continuation = nil }
+    func finish(with receipt: ConversationInputReceipt) { continuation?.resume(returning: receipt); continuation = nil }
 }
 
-private actor SwitchingChatClient: AIChatService {
+private actor SwitchingChatClient: AgentConversing {
     private let conversations: [Conversation]
-    private var continuation: CheckedContinuation<ConversationTurn, Error>?
+    private var continuation: CheckedContinuation<ConversationInputReceipt, Error>?
     private var submitted = false
     init(conversations: [Conversation]) { self.conversations = conversations }
     func capabilities() async throws -> AgentCapabilities { AgentCapabilities(schemaVersion: 1, conversations: true, memories: true) }
@@ -328,11 +416,12 @@ private actor SwitchingChatClient: AIChatService {
     func createConversation() async throws -> Conversation { conversations[0] }
     func getConversation(id: String) async throws -> Conversation { conversations.first { $0.id == id }! }
     func deleteConversation(id: String, deleteMemories: Bool) async throws {}
-    func sendMessage(conversationID: String, messageID: String, question: String, periodDays: Int, snapshot: AnalysisSnapshot) async throws -> ConversationTurn {
+    func submitMessage(conversationID: String, messageID: String, question: String, periodDays: Int, snapshot: AnalysisSnapshot) async throws -> ConversationInputReceipt {
         submitted = true
         return try await withCheckedThrowingContinuation { continuation = $0 }
     }
-    func resumeTurn(conversationID: String, turnID: String) async throws -> ConversationTurn { fatalError() }
+    func observeTurn(conversationID: String, turnID: String) async throws -> ConversationTurn { fatalError() }
+    func steerQueuedTurn(conversationID: String, messageID: String, expectedTurnID: String) async throws -> ConversationInputReceipt { fatalError() }
     func cancelTurn(conversationID: String, turnID: String) async throws -> ConversationTurn { fatalError() }
     func listMemories() async throws -> [UserMemory] { [] }
     func confirmMemory(id: String) async throws -> UserMemory { fatalError() }
@@ -342,8 +431,7 @@ private actor SwitchingChatClient: AIChatService {
     func clearMemories() async throws {}
     func memoryPreferences() async throws -> MemoryPreferences { MemoryPreferences(proactiveEnabled: true) }
     func setProactiveMemory(_ enabled: Bool) async throws -> MemoryPreferences { MemoryPreferences(proactiveEnabled: enabled) }
-    func analyze(question: String, snapshot: AnalysisSnapshot) async throws -> AnalysisResponse { fatalError() }
     func waitForSubmission() async { for _ in 0..<1_000 { if submitted { return }; await Task.yield() } }
-    func finish(with turn: ConversationTurn) { continuation?.resume(returning: turn); continuation = nil }
+    func finish(with receipt: ConversationInputReceipt) { continuation?.resume(returning: receipt); continuation = nil }
 }
 

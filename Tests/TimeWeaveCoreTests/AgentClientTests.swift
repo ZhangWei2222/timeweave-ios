@@ -211,9 +211,9 @@ final class AgentClientTests: XCTestCase, @unchecked Sendable {
         let pollCount = LockedCounter()
         StubURLProtocol.set { request in
             switch (request.httpMethod, request.url?.path) {
-            case ("POST", "/v1/conversations/conv-1/turns"):
+            case ("POST", "/v1/conversations/conv-1/inputs"):
                 postCount.increment()
-                return (202, Data(#"{"turn_id":"turn-1","conversation_id":"conv-1","message_id":"message-stable","thread_id":"thread-turn-1","question":"继续分析","period_days":7,"status":"accepted","created_at":"2026-11-05T01:00:00Z","updated_at":"2026-11-05T01:00:00Z"}"#.utf8))
+                return (202, Data(#"{"schema_version":1,"message_id":"message-stable","disposition":"started","turn_id":"turn-1","conversation_revision":2}"#.utf8))
             case ("GET", "/v1/conversations/conv-1/turns/turn-1/events"):
                 eventCount.increment()
                 XCTAssertEqual(request.value(forHTTPHeaderField: "Accept"), "text/event-stream")
@@ -237,7 +237,11 @@ final class AgentClientTests: XCTestCase, @unchecked Sendable {
 
         let turn: ConversationTurn
         do {
-            turn = try await client.sendMessage(conversationID: "conv-1", messageID: "message-stable", question: "继续分析", periodDays: 7, snapshot: snapshot())
+            let receipt = try await client.submitMessage(conversationID: "conv-1", messageID: "message-stable", question: "继续分析", periodDays: 7, snapshot: snapshot())
+            XCTAssertEqual(receipt.disposition, .started)
+            XCTAssertEqual(receipt.conversationRevision, 2)
+            XCTAssertEqual(eventCount.value, 0)
+            turn = try await client.observeTurn(conversationID: "conv-1", turnID: receipt.turnID)
         } catch {
             XCTFail("SSE failed with \(error); posts=\(postCount.value) events=\(eventCount.value) polls=\(pollCount.value)")
             return
@@ -257,7 +261,7 @@ final class AgentClientTests: XCTestCase, @unchecked Sendable {
         let getCount = LockedCounter()
         StubURLProtocol.set { request in
             switch (request.httpMethod, request.url?.path) {
-            case ("POST", "/v1/conversations/conv-1/turns"):
+            case ("POST", "/v1/conversations/conv-1/inputs"):
                 postCount.increment()
                 let object = try JSONSerialization.jsonObject(with: requestBodyData(request)) as! [String: Any]
                 XCTAssertEqual(object["schema_version"] as? Int, 1)
@@ -265,7 +269,7 @@ final class AgentClientTests: XCTestCase, @unchecked Sendable {
                 XCTAssertEqual(object["question"] as? String, "继续分析")
                 XCTAssertEqual(object["period_days"] as? Int, 7)
                 XCTAssertNotNil(object["snapshot"] as? [String: Any])
-                return (202, Data(#"{"turn_id":"turn-1","conversation_id":"conv-1","message_id":"message-stable","thread_id":"thread-turn-1","question":"继续分析","period_days":7,"status":"accepted","created_at":"2026-11-05T01:00:00Z","updated_at":"2026-11-05T01:00:00Z"}"#.utf8))
+                return (202, Data(#"{"schema_version":1,"message_id":"message-stable","disposition":"started","turn_id":"turn-1","conversation_revision":2}"#.utf8))
             case ("GET", "/v1/conversations/conv-1/turns/turn-1/events"):
                 eventCount.increment()
                 return (404, Data(#"{"schema_version":1,"error":{"code":"not_found","message":"接口不存在。","retryable":false}}"#.utf8))
@@ -278,7 +282,8 @@ final class AgentClientTests: XCTestCase, @unchecked Sendable {
             }
         }
 
-        let turn = try await client.sendMessage(conversationID: "conv-1", messageID: "message-stable", question: "继续分析", periodDays: 7, snapshot: snapshot())
+        let receipt = try await client.submitMessage(conversationID: "conv-1", messageID: "message-stable", question: "继续分析", periodDays: 7, snapshot: snapshot())
+        let turn = try await client.observeTurn(conversationID: "conv-1", turnID: receipt.turnID)
 
         XCTAssertEqual(postCount.value, 1)
         XCTAssertEqual(eventCount.value, 1)
@@ -296,8 +301,6 @@ final class AgentClientTests: XCTestCase, @unchecked Sendable {
         let oversizedEvent = "event: turn\ndata: \(terminal)\n" + String(repeating: "data:\(oneMiBOfJSONWhitespace)\n", count: 5) + "\n"
         StubURLProtocol.set { request in
             switch (request.httpMethod, request.url?.path) {
-            case ("POST", "/v1/conversations/conv-1/turns"):
-                return (202, Data(#"{"turn_id":"turn-1","conversation_id":"conv-1","message_id":"message-stable","thread_id":"thread-turn-1","question":"继续分析","period_days":7,"status":"accepted","created_at":"2026-11-05T01:00:00Z","updated_at":"2026-11-05T01:00:00Z"}"#.utf8))
             case ("GET", "/v1/conversations/conv-1/turns/turn-1/events"):
                 return (200, Data(oversizedEvent.utf8))
             case ("GET", "/v1/conversations/conv-1/turns/turn-1"):
@@ -309,7 +312,7 @@ final class AgentClientTests: XCTestCase, @unchecked Sendable {
             }
         }
 
-        let turn = try await client.sendMessage(conversationID: "conv-1", messageID: "message-stable", question: "继续分析", periodDays: 7, snapshot: snapshot())
+        let turn = try await client.observeTurn(conversationID: "conv-1", turnID: "turn-1")
 
         XCTAssertEqual(pollCount.value, 1)
         XCTAssertEqual(turn.runID, "run-get")
@@ -319,18 +322,40 @@ final class AgentClientTests: XCTestCase, @unchecked Sendable {
     func testConversationClientRejectsMalformedTerminalTurn() async throws {
         let client = AgentClient(session: stubSession())
         StubURLProtocol.set { request in
-            if request.httpMethod == "POST" {
-                return (202, Data(#"{"turn_id":"turn-1","conversation_id":"conv-1","message_id":"message-1","thread_id":"thread-turn-1","question":"分析","period_days":7,"status":"accepted","created_at":"2026-11-05T01:00:00Z","updated_at":"2026-11-05T01:00:00Z"}"#.utf8))
-            }
             return (200, Data(#"{"turn_id":"turn-1","conversation_id":"conv-1","message_id":"message-1","thread_id":"thread-turn-1","question":"分析","period_days":7,"status":"completed","answer":" ","created_at":"2026-11-05T01:00:00Z","updated_at":"2026-11-05T01:00:01Z"}"#.utf8))
         }
 
         do {
-            _ = try await client.sendMessage(conversationID: "conv-1", messageID: "message-1", question: "分析", periodDays: 7, snapshot: snapshot())
+            _ = try await client.observeTurn(conversationID: "conv-1", turnID: "turn-1")
             XCTFail("accepted malformed terminal turn")
         } catch let error as AgentClientError {
             XCTAssertEqual(error, .invalidResponse)
         }
+    }
+
+    func testQueuedInputAndSteeringReturnReceiptsWithoutOpeningAStream() async throws {
+        let client = AgentClient(session: stubSession())
+        StubURLProtocol.set { request in
+            XCTAssertEqual(request.httpMethod, "POST")
+            switch request.url?.path {
+            case "/v1/conversations/conv-1/inputs":
+                return (202, Data(#"{"schema_version":1,"message_id":"message-b","disposition":"queued","turn_id":"turn-b","conversation_revision":3}"#.utf8))
+            case "/v1/conversations/conv-1/inputs/message-b/steer":
+                let body = try JSONSerialization.jsonObject(with: requestBodyData(request)) as? [String: Any]
+                XCTAssertEqual(body?["schema_version"] as? Int, 1)
+                XCTAssertEqual(body?["expected_turn_id"] as? String, "turn-a")
+                return (202, Data(#"{"schema_version":1,"message_id":"message-b","disposition":"steered","turn_id":"turn-b","conversation_revision":4}"#.utf8))
+            default:
+                XCTFail("unexpected request \(request)")
+                return (500, Data())
+            }
+        }
+
+        let queued = try await client.submitMessage(conversationID: "conv-1", messageID: "message-b", question: "只看晚上", periodDays: 7, snapshot: snapshot())
+        XCTAssertEqual(queued.disposition, .queued)
+        let steered = try await client.steerQueuedTurn(conversationID: "conv-1", messageID: queued.messageID, expectedTurnID: "turn-a")
+        XCTAssertEqual(steered.disposition, .steered)
+        XCTAssertEqual(steered.turnID, queued.turnID)
     }
 
     func testMemoryControlResourcesUseTypedContracts() async throws {

@@ -41,9 +41,11 @@ struct AIAnalysisView: View {
                 }
                 ToolbarItemGroup(placement: .navigationBarTrailing) {
                     conversationMenu
-                    Button { showingMemories = true } label: {
-                        Label("AI 对我的了解", systemImage: "brain.head.profile")
-                    }.accessibilityIdentifier("analysisMemories")
+                    if model.supportsMemories {
+                        Button { showingMemories = true } label: {
+                            Label("AI 对我的了解", systemImage: "brain.head.profile")
+                        }.accessibilityIdentifier("analysisMemories")
+                    }
                 }
             }
             ToolbarItem(placement: .navigationBarTrailing) {
@@ -76,10 +78,6 @@ struct AIAnalysisView: View {
                 Text("近 \(period) 天").font(.caption.weight(.medium)).foregroundStyle(.secondary)
             }
             Text(service.currentAddress).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-            if model.mode == .legacy {
-                Label("当前服务不保存对话", systemImage: "exclamationmark.circle")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
         }
         .padding(.horizontal, 16).padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -88,7 +86,7 @@ struct AIAnalysisView: View {
     private var timeline: some View {
         ScrollView {
             LazyVStack(spacing: 12) {
-                if model.messages.isEmpty && model.error == nil {
+                if model.messages.isEmpty && model.error == nil && model.blockedTurnError == nil && !model.isObserving {
                     VStack(spacing: 10) {
                         Image(systemName: "sparkles")
                             .font(.largeTitle)
@@ -104,7 +102,7 @@ struct AIAnalysisView: View {
                 ForEach(model.messages) { message in
                     messageBubble(message)
                 }
-                if model.isLoading {
+                if model.isObserving {
                     HStack(spacing: 8) {
                         ProgressView()
                         Text("Agent 正在分析…").font(.subheadline).foregroundStyle(.secondary)
@@ -113,14 +111,14 @@ struct AIAnalysisView: View {
                     .padding(12).background(Palette.card).clipShape(RoundedRectangle(cornerRadius: 14))
                     .accessibilityIdentifier("analysisPending")
                 }
-                if let error = model.error {
+                if let error = model.error ?? model.blockedTurnError {
                     Card {
                         Label("暂时无法分析", systemImage: "exclamationmark.triangle").font(.headline)
                         Text(error.localizedDescription).font(.subheadline)
                         if model.mode == .loading {
                             Button("重试") { Task { await model.load() } }
                         } else if error.retryable {
-                            Button("重试", action: model.retry).disabled(!model.canSubmit)
+                            Button("重试", action: model.retry).disabled(model.isSubmitting)
                         }
                     }.accessibilityIdentifier("analysisError")
                 }
@@ -158,18 +156,44 @@ struct AIAnalysisView: View {
         }
     }
 
+    private var queuedMessageRows: some View {
+        VStack(spacing: 8) {
+            ForEach(model.queuedTurns) { turn in
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(turn.question).font(.subheadline).lineLimit(2)
+                        Text("排队中").font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("立即发送") { Task { await model.steer(turn) } }
+                        .buttonStyle(.bordered)
+                        .disabled(!model.canSteer || model.steeringTurnIDs.contains(turn.id))
+                }
+                .padding(8)
+                .background(Palette.background, in: RoundedRectangle(cornerRadius: 10))
+            }
+        }
+    }
+
     private var composer: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if !model.queuedTurns.isEmpty {
+                ViewThatFits(in: .vertical) {
+                    queuedMessageRows
+                    ScrollView { queuedMessageRows }
+                }
+                .frame(maxHeight: 160)
+            }
             TextField("继续追问，或说“记住……”", text: $model.draft, axis: .vertical)
                 .lineLimit(2...6).textFieldStyle(.roundedBorder)
-                .disabled(model.isLoading || model.mode == .loading)
+                .disabled(model.mode == .loading)
                 .accessibilityIdentifier("analysisComposer")
             HStack {
                 Text("只发送聚合统计，不发送记录明细或备注。")
                     .font(.caption2).foregroundStyle(.secondary)
                 Spacer()
                 Button(action: model.submit) {
-                    Label(model.isLoading ? "分析中" : "发送", systemImage: "arrow.up.circle.fill")
+                    Label(model.isSubmitting ? "发送中" : "发送", systemImage: "arrow.up.circle.fill")
                 }
                 .buttonStyle(.borderedProminent).disabled(!model.canSubmit)
                 .accessibilityIdentifier("sendAnalysisMessage")

@@ -33,10 +33,35 @@ struct ChatMessage: Codable, Equatable, Identifiable, Sendable {
 }
 
 enum ConversationTurnStatus: String, Codable, Equatable, Sendable {
-    case accepted, running, completed, paused
+    case queued, steered, accepted, running, completed, paused
     case needsAttention = "needs_attention"
     case cancelled
-    var isTerminal: Bool { self == .completed || self == .paused || self == .needsAttention || self == .cancelled }
+    var isTerminal: Bool { self == .completed || self == .paused || self == .needsAttention || self == .cancelled || self == .steered }
+}
+
+struct ConversationInputReceipt: Decodable, Equatable, Sendable {
+    enum Disposition: String, Decodable, Sendable { case queued, started, steered }
+
+    let schemaVersion: Int
+    let messageID: String
+    let disposition: Disposition
+    let turnID: String
+    let conversationRevision: UInt64
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version", messageID = "message_id", disposition
+        case turnID = "turn_id", conversationRevision = "conversation_revision"
+    }
+}
+
+struct ConversationSteeringInput: Codable, Equatable, Sendable {
+    let messageID: String
+    let question: String
+    let createdAt: String
+
+    enum CodingKeys: String, CodingKey {
+        case messageID = "message_id", question, createdAt = "created_at"
+    }
 }
 
 enum UserMemoryKind: String, Codable, Equatable, Sendable { case goal, preference, constraint }
@@ -66,6 +91,8 @@ struct ConversationTurn: Codable, Equatable, Identifiable, Sendable {
     let errorMessage: String?
     let retryable: Bool?
     let memoryChanges: [MemoryChange]
+    let steeredInputs: [ConversationSteeringInput]
+    let targetTurnID: String?
     let createdAt: String
     let updatedAt: String
 
@@ -73,6 +100,7 @@ struct ConversationTurn: Codable, Equatable, Identifiable, Sendable {
         case id = "turn_id", conversationID = "conversation_id", messageID = "message_id", threadID = "thread_id"
         case question, periodDays = "period_days", status, runID = "run_id", answer
         case errorCode = "error_code", errorMessage = "error_message", retryable
+        case steeredInputs = "steered_inputs", targetTurnID = "target_turn_id"
         case memoryChanges = "memory_changes", createdAt = "created_at", updatedAt = "updated_at"
     }
 
@@ -91,6 +119,8 @@ struct ConversationTurn: Codable, Equatable, Identifiable, Sendable {
         errorMessage = try values.decodeIfPresent(String.self, forKey: .errorMessage)
         retryable = try values.decodeIfPresent(Bool.self, forKey: .retryable)
         memoryChanges = try values.decodeIfPresent([MemoryChange].self, forKey: .memoryChanges) ?? []
+        steeredInputs = try values.decodeIfPresent([ConversationSteeringInput].self, forKey: .steeredInputs) ?? []
+        targetTurnID = try values.decodeIfPresent(String.self, forKey: .targetTurnID)
         createdAt = try values.decode(String.self, forKey: .createdAt)
         updatedAt = try values.decode(String.self, forKey: .updatedAt)
     }
@@ -104,12 +134,14 @@ struct Conversation: Codable, Equatable, Identifiable, Sendable {
     let messages: [ChatMessage]
     let turns: [ConversationTurn]
     let activeTurnID: String?
+    let queueBlockedByTurnID: String?
     let createdAt: String
     let updatedAt: String
 
     enum CodingKeys: String, CodingKey {
         case id = "conversation_id", principalID = "principal_id", title, revision, messages, turns
-        case activeTurnID = "active_turn_id", createdAt = "created_at", updatedAt = "updated_at"
+        case activeTurnID = "active_turn_id", queueBlockedByTurnID = "queue_blocked_by_turn_id"
+        case createdAt = "created_at", updatedAt = "updated_at"
     }
 
     init(from decoder: Decoder) throws {
@@ -121,6 +153,7 @@ struct Conversation: Codable, Equatable, Identifiable, Sendable {
         messages = try values.decodeIfPresent([ChatMessage].self, forKey: .messages) ?? []
         turns = try values.decodeIfPresent([ConversationTurn].self, forKey: .turns) ?? []
         activeTurnID = try values.decodeIfPresent(String.self, forKey: .activeTurnID)
+        queueBlockedByTurnID = try values.decodeIfPresent(String.self, forKey: .queueBlockedByTurnID)
         createdAt = try values.decode(String.self, forKey: .createdAt)
         updatedAt = try values.decode(String.self, forKey: .updatedAt)
     }
@@ -160,8 +193,9 @@ protocol AgentConversing: Sendable {
     func createConversation() async throws -> Conversation
     func getConversation(id: String) async throws -> Conversation
     func deleteConversation(id: String, deleteMemories: Bool) async throws
-    func sendMessage(conversationID: String, messageID: String, question: String, periodDays: Int, snapshot: AnalysisSnapshot) async throws -> ConversationTurn
-    func resumeTurn(conversationID: String, turnID: String) async throws -> ConversationTurn
+    func submitMessage(conversationID: String, messageID: String, question: String, periodDays: Int, snapshot: AnalysisSnapshot) async throws -> ConversationInputReceipt
+    func steerQueuedTurn(conversationID: String, messageID: String, expectedTurnID: String) async throws -> ConversationInputReceipt
+    func observeTurn(conversationID: String, turnID: String) async throws -> ConversationTurn
     func cancelTurn(conversationID: String, turnID: String) async throws -> ConversationTurn
     func listMemories() async throws -> [UserMemory]
     func confirmMemory(id: String) async throws -> UserMemory
@@ -292,7 +326,7 @@ struct AgentClient: AgentAnalyzing, AgentConversing {
         try await requestEmpty(url: components.url!, method: "DELETE", expectedStatus: [204])
     }
 
-    func sendMessage(conversationID: String, messageID: String, question: String, periodDays: Int, snapshot: AnalysisSnapshot) async throws -> ConversationTurn {
+    func submitMessage(conversationID: String, messageID: String, question: String, periodDays: Int, snapshot: AnalysisSnapshot) async throws -> ConversationInputReceipt {
         struct Request: Encodable {
             let schemaVersion = 1
             let messageID: String
@@ -302,34 +336,34 @@ struct AgentClient: AgentAnalyzing, AgentConversing {
             enum CodingKeys: String, CodingKey { case schemaVersion = "schema_version", messageID = "message_id", question, periodDays = "period_days", snapshot }
         }
         let body = try JSONEncoder().encode(Request(messageID: messageID, question: question, periodDays: periodDays, snapshot: snapshot))
-        let turn = try await requestJSON(path: ["v1", "conversations", conversationID, "turns"], method: "POST", body: body, expectedStatus: [202], as: ConversationTurn.self)
-        try validate(turn: turn)
-        if turn.status.isTerminal { return turn }
-        return try await waitForTurn(conversationID: conversationID, turnID: turn.id)
+        return try await submitInput(path: ["v1", "conversations", conversationID, "inputs"], body: body, messageID: messageID)
     }
 
-    func resumeTurn(conversationID: String, turnID: String) async throws -> ConversationTurn {
-        try await waitForTurn(conversationID: conversationID, turnID: turnID)
+    func steerQueuedTurn(conversationID: String, messageID: String, expectedTurnID: String) async throws -> ConversationInputReceipt {
+        struct Request: Encodable {
+            let schemaVersion = 1
+            let expectedTurnID: String
+            enum CodingKeys: String, CodingKey { case schemaVersion = "schema_version", expectedTurnID = "expected_turn_id" }
+        }
+        let body = try JSONEncoder().encode(Request(expectedTurnID: expectedTurnID))
+        return try await submitInput(path: ["v1", "conversations", conversationID, "inputs", messageID, "steer"], body: body, messageID: messageID)
     }
 
-    private func waitForTurn(conversationID: String, turnID: String) async throws -> ConversationTurn {
-        try await withThrowingTaskGroup(of: ConversationTurn.self) { group in
-            group.addTask {
-                do {
-                    return try await streamTurn(conversationID: conversationID, turnID: turnID)
-                } catch is CancellationError {
-                    throw CancellationError()
-                } catch {
-                    return try await pollTurn(conversationID: conversationID, turnID: turnID)
-                }
-            }
-            group.addTask {
-                try await Task.sleep(nanoseconds: 120 * 1_000_000_000)
-                throw AgentClientError.transport(.timedOut)
-            }
-            defer { group.cancelAll() }
-            guard let result = try await group.next() else { throw AgentClientError.invalidResponse }
-            return result
+    private func submitInput(path: [String], body: Data, messageID: String) async throws -> ConversationInputReceipt {
+        let receipt = try await requestJSON(path: path, method: "POST", body: body, expectedStatus: [202], as: ConversationInputReceipt.self)
+        guard receipt.schemaVersion == 1, receipt.messageID == messageID, !receipt.turnID.isEmpty else {
+            throw AgentClientError.invalidResponse
+        }
+        return receipt
+    }
+
+    func observeTurn(conversationID: String, turnID: String) async throws -> ConversationTurn {
+        do {
+            return try await streamTurn(conversationID: conversationID, turnID: turnID)
+        } catch {
+            try Task.checkCancellation()
+            if error is CancellationError { throw error }
+            return try await pollTurn(conversationID: conversationID, turnID: turnID)
         }
     }
 
